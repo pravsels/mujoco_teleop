@@ -52,8 +52,9 @@ def main():
     args = parser.parse_args()
     is_master = args.mode == "master"
 
+    robot_model_name = 'i2rt_yam'
     # Path to model 
-    model_path = "robot_models/so101/scene.xml"
+    model_path = f"robot_models/{robot_model_name}/scene.xml"
     
     if not os.path.exists(model_path):
         print(f"Model not found: {model_path}")
@@ -74,8 +75,8 @@ def main():
 
     # ZeroMQ for publisher and subscriber 
     ctx = zmq.Context()
-    pub = make_pub(ctx, PUB_ADDR, "so101.state_sim")
-    sub = None if is_master else make_sub(ctx, SUB_ADDR, "so101.state_real")
+    pub = make_pub(ctx, PUB_ADDR, f"{robot_model_name}.state_sim")
+    sub = None if is_master else make_sub(ctx, SUB_ADDR, f"{robot_model_name}.state_real")
 
     def get_sim_state():
         return data.qpos[:model.nq].astype(float).tolist()
@@ -94,7 +95,7 @@ def main():
 
         mujoco.mj_forward(model, data)
     
-    run_loop(pub, sub, get_sim_state, apply_real_state, "so101.state_sim", model, data)
+    run_loop(pub, sub, get_sim_state, apply_real_state, f"{robot_model_name}.state_sim", model, data)
 
     pub.close(0)
     if sub:
