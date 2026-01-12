@@ -15,7 +15,8 @@ def map_norm_to_qpos(model, qnorm):
     - Uses jnt_range when jnt_limited==1.
     - Fallbacks if unlimited: hinge → [-pi, pi], slide → [-1, 1].
     - Skips free joints.
-    Yields tuples (qpos_address, q_value).
+    Yields tuples (qpos_address, q_value). 
+    This is more robust than returning a full array, as it handles skipped joints correctly. 
     """
     n = min(len(qnorm), model.njnt)
     for j in range(n):
@@ -23,6 +24,7 @@ def map_norm_to_qpos(model, qnorm):
         limited = model.jnt_limited[j]
         qadr    = model.jnt_qposadr[j]
         x = float(qnorm[j])
+        
         if x < 0.0: x = 0.0
         if x > 1.0: x = 1.0
 
@@ -35,9 +37,9 @@ def map_norm_to_qpos(model, qnorm):
             else:
                 if jtype == mujoco.mjtJoint.mjJNT_HINGE:
                     lo, hi = -np.pi, np.pi
-                else:
-                    lo, hi = -1.0, 1.0
+
             q = lo + x * (hi - lo)
+            
             yield qadr, q
 
 def main():
@@ -57,7 +59,7 @@ def main():
         print(f"Model not found: {model_path}")
         print(f"CWD: {os.getcwd()}")
         return
-
+    
     print("Loading robot model …")
     model = mujoco.MjModel.from_xml_path(model_path)
     data  = mujoco.MjData(model)
@@ -70,6 +72,7 @@ def main():
     poller = zmq.Poller()
     poller.register(sub, zmq.POLLIN)
 
+    # a safety mechanism against a rate of 0 
     dt = 1.0 / max(1e-6, args.rate)
     print(f"\nSubscribing to {args.sub_addr} | topic='{topic}'")
     print("Launching viewer…")
@@ -78,13 +81,16 @@ def main():
         try:
             last = time.time()
             while viewer.is_running():
-                # receive latest (non-blocking)
+                # receive latest message. timeout=0 makes it non-blocking. 
                 socks = dict(poller.poll(timeout=0))
                 if sub in socks and socks[sub] == zmq.POLLIN:
                     try:
                         _, payload = sub.recv_multipart(flags=zmq.NOBLOCK)
                         msg = json.loads(payload.decode("utf-8"))
+
                         qnorm = msg.get("qnorm", [])
+
+                        # loop through and set norm values for every joint 
                         for adr, q in map_norm_to_qpos(model, qnorm):
                             data.qpos[adr] = q
 
@@ -95,7 +101,7 @@ def main():
 
                 viewer.sync()
 
-                # simple pacing
+                # simple pacing to enforce target refresh rate 
                 now = time.time()
                 sleep = dt - (now - last)
                 if sleep > 0:

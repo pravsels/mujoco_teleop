@@ -11,4 +11,6 @@ dependencies = [
   "dm-control",
   "numpy",
   "pyzmq>=26",
+  "dynamixel-sdk>=3.7.31",
+  "pyserial>=3.5",
 ]
