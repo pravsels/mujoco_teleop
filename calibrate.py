@@ -44,8 +44,10 @@ def main():
     ap.add_argument("--ids", default="1,2,3,4,5,6,7", help="Comma list of servo IDs (order = joints)")
     ap.add_argument("--names", default="", help="Optional comma list of names matching --ids")
     ap.add_argument("--hz", type=float, default=20.0, help="Print refresh rate")
-    ap.add_argument("--save", action="store_true",
-                    help="If set, save session min/max JSON (ticks) to a timestamped file")
+    ap.add_argument("--save", dest="save", action="store_true", default=True,
+                    help="Save session min/max JSON (ticks) to yam.json (default: on)")
+    ap.add_argument("--no-save", dest="save", action="store_false",
+                    help="Do not write calibration JSON to disk")
     args = ap.parse_args()
 
     ids = [int(x) for x in args.ids.split(",") if x.strip()]

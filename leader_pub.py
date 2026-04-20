@@ -62,7 +62,7 @@ def main():
                     help="Topic/model prefix (default i2rt_yam)")
     ap.add_argument("--hz", type=float, default=100.0,
                     help="Publish rate in Hz (<=0 = as fast as possible)")
-    ap.add_argument("--calib", default="gello_jannik.json",
+    ap.add_argument("--calib", default="yam.json",
                     help="Calibration JSON with per-joint min/max ticks (default yam.json)")
     args = ap.parse_args()
 
