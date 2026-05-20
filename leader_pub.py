@@ -1,31 +1,13 @@
 # leader_pub.py
-
-# Reads Dynamixel PRESENT_POSITION (ticks) via GroupSyncRead,
+#
+# Reads servo positions (Dynamixel or Feetech) via GroupSyncRead,
 # normalizes each joint to [0,1] using per-joint min/max from a calib JSON,
 # and publishes on ZMQ as:  { "t": <unix_time>, "qnorm": [..] }
 
-# Default calib file: ./yam.json
-
 import argparse, json, sys, time, zmq
-from dynamixel_sdk import PortHandler, PacketHandler, GroupSyncRead, COMM_SUCCESS
+from models import get_model, get_sdk
 
-# ----------------- constants -----------------
-
-PUB_ADDR = "tcp://*:6000"            # ZMQ PUB bind address
-ADDR_PRESENT_POSITION = 132          # X-series, Protocol 2.0
-LEN_PRESENT_POSITION = 4             # 4 bytes
-
-# Friendly joint names per Dynamixel ID (matches lerobot_yam yam_leader.py)
-DEFAULT_JOINT_NAMES = {
-    1: "shoulder_pan",
-    2: "shoulder_lift",
-    3: "elbow_flex",
-    4: "wrist_flex",
-    5: "wrist_roll",
-    6: "wrist_yaw",
-    7: "gripper",
-}
-
+PUB_ADDR = "tcp://*:6000"
 CLEAR_LINE = "\x1b[2K\r"
 
 # ----------------- helpers -------------------
@@ -36,7 +18,7 @@ def make_pub(ctx, addr, topic):
     print(f"Publishing on {addr}, topic = {topic}")
     return pub
 
-def load_calib(path, ids):
+def load_calib(path, ids, joint_names):
     """Load calib JSON (ticks) and return dict id -> (name, min, max).
 
     Supports two formats:
@@ -44,13 +26,9 @@ def load_calib(path, ids):
     1. Legacy format (e.g. yam.json):
        { "J1": {"id": 1, "min": 970, "max": 2953}, ... }
 
-    2. LeRobot format (e.g. yam_lerobot.json):
+    2. LeRobot format:
        { "shoulder_pan": {"id": 1, "drive_mode": 0, "homing_offset": 0,
                           "range_min": 1283, "range_max": 2807}, ... }
-
-    Friendly joint names are taken from the JSON key when it is already
-    friendly (e.g. 'shoulder_pan'); otherwise we fall back to
-    DEFAULT_JOINT_NAMES (e.g. id 6 -> 'wrist_yaw').
     """
     with open(path, "r") as f:
         raw = json.load(f)
@@ -71,10 +49,10 @@ def load_calib(path, ids):
         if hi <= lo:
             raise ValueError(f"Invalid span for joint '{key}' (id {sid}): min >= max")
 
-        if key in DEFAULT_JOINT_NAMES.values():
+        if key in joint_names.values():
             friendly = key
         else:
-            friendly = DEFAULT_JOINT_NAMES.get(sid, key)
+            friendly = joint_names.get(sid, key)
         by_id[sid] = (friendly, lo, hi)
 
     missing = [sid for sid in ids if sid not in by_id]
@@ -91,26 +69,22 @@ def norm01(x_ticks, lo, hi):
 def in_range(ticks, lo, hi, tol):
     return (lo - tol) <= ticks <= (hi + tol)
 
-def read_all_ticks(gsr, ids, max_attempts=10, retry_sleep_s=0.005):
-    """Read ticks for every id with light retry. Returns dict id -> int ticks, or None on persistent failure."""
+def read_all_ticks(gsr, ids, addr, length, comm_success, max_attempts=10, retry_sleep_s=0.005):
+    """Read ticks for every id with light retry."""
     for _ in range(max_attempts):
-        if gsr.txRxPacket() == COMM_SUCCESS:
-            return {sid: int(gsr.getData(sid, ADDR_PRESENT_POSITION, LEN_PRESENT_POSITION)) for sid in ids}
+        if gsr.txRxPacket() == comm_success:
+            return {sid: int(gsr.getData(sid, addr, length)) for sid in ids}
         time.sleep(retry_sleep_s)
     return None
 
-def preflight_range_check(gsr, ids, calib, tol_ticks, refresh_hz):
-    """Phase 1: block until every joint is within its calibrated range (with tolerance).
-
-    Prints a single live-updating line per refresh listing offending joints by
-    friendly name and the direction the user needs to rotate.
-    """
+def preflight_range_check(gsr, ids, calib, addr, length, comm_success, tol_ticks, refresh_hz):
+    """Block until every joint is within its calibrated range (with tolerance)."""
     period = 1.0 / max(1.0, float(refresh_hz))
-    print("Preflight: checking GELLO joint ranges. Rotate any flagged joint until it is in range.",
+    print("Preflight: checking joint ranges. Rotate any flagged joint until it is in range.",
           flush=True)
     try:
         while True:
-            ticks_by_id = read_all_ticks(gsr, ids)
+            ticks_by_id = read_all_ticks(gsr, ids, addr, length, comm_success)
             if ticks_by_id is None:
                 sys.stdout.write(CLEAR_LINE + "Preflight: read failure, retrying...")
                 sys.stdout.flush()
@@ -143,24 +117,37 @@ def preflight_range_check(gsr, ids, calib, tol_ticks, refresh_hz):
         raise
 
 
+def setup_feetech(pkt, ph, ids, mcfg):
+    """Feetech-specific setup: unlock, disable torque, clear Phase bit 4 (STS3215)."""
+    addr_lock = mcfg.get("addr_lock", 55)
+    addr_torque = mcfg["addr_torque_enable"]
+    addr_phase = mcfg.get("addr_phase", 18)
+
+    for sid in ids:
+        pkt.write1ByteTxRx(ph, sid, addr_lock, 0)
+        pkt.write1ByteTxRx(ph, sid, addr_torque, 0)
+        phase, _, _ = pkt.read1ByteTxRx(ph, sid, addr_phase)
+        if phase & 0x10:
+            pkt.write1ByteTxRx(ph, sid, addr_phase, phase & ~0x10)
+            print(f"  Servo {sid}: cleared Phase bit 4 (angle feedback mode)")
+
+
 # ----------------- main ----------------------
 
 def main():
-    ap = argparse.ArgumentParser("Dynamixel → normalized [0,1] publisher (ticks-based)")
+    ap = argparse.ArgumentParser("Servo → normalized [0,1] publisher (Dynamixel + Feetech)")
     ap.add_argument("--port", required=True, help="e.g. /dev/ttyUSB0 or COM3")
-    ap.add_argument("--baud", type=int, default=57600)
-    ap.add_argument("--ids", default="1,2,3,4,5,6,7",
-                    help="Comma list of servo IDs (order = joints)")
+    ap.add_argument("--baud", type=int, default=None,
+                    help="Override baud rate (default: from model config)")
+    ap.add_argument("--ids", default=None,
+                    help="Override servo IDs as comma list (default: from model config)")
     ap.add_argument("--model", default="i2rt_yam",
-                    help="Topic/model prefix (default i2rt_yam)")
+                    help="Robot model: i2rt_yam, so101, so100")
     ap.add_argument("--hz", type=float, default=100.0,
                     help="Publish rate in Hz (<=0 = as fast as possible)")
-    ap.add_argument("--calib", default="yam.json",
-                    help="Calibration JSON with per-joint ticks. Supports both the "
-                         "legacy {min,max} format and the LeRobot {range_min,range_max} "
-                         "format (e.g. yam_lerobot.json). Default: yam.json")
+    ap.add_argument("--calib", default=None,
+                    help="Calibration JSON (default: from model config)")
 
-    # Range-safety options (mirrors lerobot_yam yam_leader.py)
     ap.add_argument("--no-preflight", action="store_true",
                     help="Skip preflight range check at startup")
     ap.add_argument("--no-freeze-out-of-range", action="store_true",
@@ -174,27 +161,42 @@ def main():
 
     args = ap.parse_args()
 
-    ids = [int(x) for x in args.ids.split(",") if x.strip()]
+    mcfg = get_model(args.model)
+    sdk = get_sdk(mcfg["servo_type"])
+
+    ids = [int(x) for x in args.ids.split(",") if x.strip()] if args.ids else mcfg["ids"]
+    baud = args.baud or mcfg["baud"]
+    calib_path = args.calib or mcfg["default_calib"]
+
+    addr_pos = mcfg["addr_present_position"]
+    len_pos = mcfg["len_present_position"]
+    joint_names = mcfg["joint_names"]
+
     topic_norm = f"{args.model}.state_norm"
     dt = 0.0 if args.hz <= 0 else 1.0 / args.hz
 
-    calib = load_calib(args.calib, ids)   # id -> (name, min, max)
+    calib = load_calib(calib_path, ids, joint_names)
 
-    ph = PortHandler(args.port)
+    print(f"Model: {args.model} ({mcfg['servo_type']})")
+    print(f"Port: {args.port}, Baud: {baud}, IDs: {ids}")
+
+    ph = sdk.PortHandler(args.port)
     if not ph.openPort():
         raise OSError(f"Cannot open port {args.port}")
-    if not ph.setBaudRate(args.baud):
-        raise OSError(f"Cannot set baudrate {args.baud} on {args.port}")
-    pkt = PacketHandler(2.0)
+    if not ph.setBaudRate(baud):
+        raise OSError(f"Cannot set baudrate {baud} on {args.port}")
+    pkt = sdk.PacketHandler(mcfg["protocol_version"])
 
-    gsr = GroupSyncRead(ph, pkt, ADDR_PRESENT_POSITION, LEN_PRESENT_POSITION)
+    if mcfg["servo_type"] == "feetech":
+        setup_feetech(pkt, ph, ids, mcfg)
+
+    gsr = sdk.GroupSyncRead(ph, pkt, addr_pos, len_pos)
     for sid in ids:
         gsr.addParam(sid)
 
-    # Phase 1: preflight
     if not args.no_preflight:
         preflight_range_check(
-            gsr, ids, calib,
+            gsr, ids, calib, addr_pos, len_pos, sdk.COMM_SUCCESS,
             tol_ticks=max(0, int(args.oor_tol_ticks)),
             refresh_hz=args.preflight_hz,
         )
@@ -203,7 +205,6 @@ def main():
     pub = make_pub(ctx, PUB_ADDR, topic_norm)
     print("Streaming normalized joint state… Ctrl+C to stop.")
 
-    # Phase 2A runtime state
     out_of_range_joints: set[int] = set()
     last_warn_time: dict[int, float] = {}
     tol = max(0, int(args.oor_tol_ticks))
@@ -212,7 +213,7 @@ def main():
 
     try:
         while True:
-            if gsr.txRxPacket() != COMM_SUCCESS:
+            if gsr.txRxPacket() != sdk.COMM_SUCCESS:
                 if dt > 0: time.sleep(dt)
                 continue
 
@@ -220,7 +221,7 @@ def main():
             now = time.perf_counter()
 
             for sid in ids:
-                ticks = int(gsr.getData(sid, ADDR_PRESENT_POSITION, LEN_PRESENT_POSITION))
+                ticks = int(gsr.getData(sid, addr_pos, len_pos))
                 name, lo, hi = calib[sid]
 
                 if in_range(ticks, lo, hi, tol):
