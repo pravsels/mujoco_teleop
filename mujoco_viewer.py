@@ -106,6 +106,7 @@ def draw_table_plane(scene, z, penetrated=False, half_extent=0.4):
 def draw_oscbf_spheres(viewer, oscbf_robot, q, table_z=None):
     import jax.numpy as jnp
 
+    q = q[: oscbf_robot.num_joints]   # strip gripper / extra joints
     collision = np.asarray(oscbf_robot.link_collision_data(jnp.asarray(q)))
     if collision.size == 0:
         return False

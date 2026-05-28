@@ -99,8 +99,8 @@ PADDED_COLLISION_POSITIONS: np.ndarray = np.array([[[ 0.0000e+00,  0.0000e+00,  
 PADDED_COLLISION_RADII: np.ndarray = np.array([[0.      , 0.      , 0.      ],
      [0.      , 0.      , 0.      ],
      [0.      , 0.      , 0.      ],
-     [0.037122, 0.05324 , 0.      ],
-     [0.035204, 0.05932 , 0.049184]])
+     [0.0124  , 0.01964 , 0.      ],
+     [0.0124  , 0.029864, 0.010457]])
 
 # Indices into the flattened (num_joints * max_spheres_per_link) arrays
 # that select the real (non-padded) spheres.

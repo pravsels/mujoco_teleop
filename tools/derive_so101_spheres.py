@@ -57,7 +57,10 @@ def _geom_sphere(model, data, geom_id: int) -> tuple[np.ndarray, float]:
     xmat = np.array(data.geom_xmat[geom_id], dtype=float).reshape(3, 3)
     verts_world = geom_xpos + verts_local @ xmat.T
     centroid = verts_world.mean(axis=0)
-    radius = float(np.linalg.norm(verts_world - centroid, axis=1).max())
+    # Use the minimum half-extent (cross-section width) rather than the
+    # max vertex distance (half-length of the jaw), so the safety sphere
+    # tightly wraps the thickness of the link, not its full reach.
+    radius = float(model.geom_size[geom_id].min())
     return centroid, radius
 
 
