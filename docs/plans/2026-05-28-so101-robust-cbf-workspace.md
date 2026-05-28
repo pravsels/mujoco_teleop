@@ -17,7 +17,7 @@
 
 **Out of scope (YAGNI):** whole-body sphere model, self-collision avoidance, torque-OSCBF on hardware, moving-obstacle barriers, JAX on the Pi.
 
-**Known gap (future work):** The moving jaw sphere is computed at the closed-jaw position. When the gripper opens, the moving jaw tip extends further (e.g. downward toward the table). The filter does NOT track this — it could miss a collision if the jaw opens near a boundary. Fix: add the gripper as a 6th joint in `NumpyKinematics`, pass 6 joint values to the filter.
+**Known gap (reopens Task 1 & 3.5):** The moving jaw sphere is computed at the closed-jaw position. When the gripper opens, the moving jaw tip extends further (e.g. downward toward the table). The filter does NOT track this — it could miss a collision if the jaw opens near a boundary. Fix: add the gripper as a 6th joint in `NumpyKinematics` and `export_so101_constants.py`, derive the moving jaw sphere as a function of gripper angle, pass 6 joint values to the filter. Tasks 1 and 3.5 are incomplete until this is addressed.
 
 ---
 
@@ -39,7 +39,7 @@ Every task ends with a **Visual Check**: an exact command you run, and an explic
 
 ---
 
-## Task 0: Verify environment and assumptions
+## Task 0: Verify environment and assumptions ✅
 
 **Files:**
 - Test: `tests/test_env_smoke.py`
@@ -79,7 +79,7 @@ git commit -m "chore: smoke test + document SO101 CBF baseline"
 
 ---
 
-## Task 1: Derive a gripper/wrist sphere cluster from the MuJoCo model
+## Task 1: Derive a gripper/wrist sphere cluster from the MuJoCo model ⚠️ INCOMPLETE
 
 **Files:**
 - Create: `tools/derive_so101_spheres.py`
@@ -126,7 +126,7 @@ git commit -m "feat: derive SO101 gripper sphere cluster from MuJoCo meshes"
 
 ---
 
-## Task 2: Local SO101 robot builder that wires in the sphere model
+## Task 2: Local SO101 robot builder that wires in the sphere model ✅
 
 oscbf stays pristine. Instead of editing oscbf's `load_robot`, add a local builder `load_so101_robot()` here that reuses oscbf's `Manipulator.from_urdf` + the SO101 URDF constant but passes `collision_data`. Migrate `mujoco_viewer.py` / `sim_to_real.py` to import from this builder.
 
@@ -175,7 +175,7 @@ git commit -m "feat: local SO101 builder with gripper collision spheres"
 
 ---
 
-## Task 3: Workspace containment config (box: floor + walls + ceiling)
+## Task 3: Workspace containment config (box: floor + walls + ceiling) ✅
 
 **Files:**
 - Create: `so101_workspace.py` (repo root) (`WorkspaceContainmentConfig`)
@@ -212,7 +212,7 @@ git commit -m "feat: SO101 workspace box containment CBF"
 
 ---
 
-## Task 3.5: Portable numpy-only `SafetyFilter` core (+ JAX parity)
+## Task 3.5: Portable numpy-only `SafetyFilter` core (+ JAX parity) ⚠️ INCOMPLETE
 
 **This is the keystone task** — the reusable component that ships to every environment, including the Pi. Tasks 4-8 become adapters around it.
 
