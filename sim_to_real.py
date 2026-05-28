@@ -173,14 +173,15 @@ def main():
     import jax.numpy as jnp
     from cbfpy import CBF
     from test_so101_real import (
-        load_robot, gate_candidate_by_fk, joint_degrees_to_radians,
+        gate_candidate_by_fk, joint_degrees_to_radians,
         joint_radians_to_degrees, _table_clearance_detail, ARM_JOINT_NAMES,
         enable_arm_torque,
     )
+    from so101_robot import load_so101_robot
     from oscbf.examples.so101_table_avoidance import TableAvoidanceConfig
 
     print("Loading OSCBF robot + CBF …")
-    oscbf_robot = load_robot()
+    oscbf_robot = load_so101_robot()
     cbf = CBF.from_config(
         TableAvoidanceConfig(oscbf_robot, min_safe_ee_z=args.min_safe_ee_z)
     )

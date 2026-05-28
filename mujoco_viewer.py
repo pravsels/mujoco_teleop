@@ -158,8 +158,8 @@ def main():
             model.geom_rgba[floor_id, 3] = 0.0
     oscbf_robot = None
     if args.show_oscbf_spheres:
-        from test_so101_real import load_robot
-        oscbf_robot = load_robot()
+        from so101_robot import load_so101_robot
+        oscbf_robot = load_so101_robot()
 
     # ZMQ sub
     ctx = zmq.Context.instance()
