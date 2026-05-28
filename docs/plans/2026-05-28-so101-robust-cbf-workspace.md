@@ -17,6 +17,8 @@
 
 **Out of scope (YAGNI):** whole-body sphere model, self-collision avoidance, torque-OSCBF on hardware, moving-obstacle barriers, JAX on the Pi.
 
+**Known gap (future work):** The moving jaw sphere is computed at the closed-jaw position. When the gripper opens, the moving jaw tip extends further (e.g. downward toward the table). The filter does NOT track this — it could miss a collision if the jaw opens near a boundary. Fix: add the gripper as a 6th joint in `NumpyKinematics`, pass 6 joint values to the filter.
+
 ---
 
 ## How verification works in this plan
@@ -33,7 +35,7 @@ Every task ends with a **Visual Check**: an exact command you run, and an explic
 - **`../oscbf` is read-only** (sandbox blocks writes there). Therefore `oscbf` stays pristine: we do NOT edit it. All SO101-specific code (sphere model, robot builder, CBF config) lives in `mujoco_teleop`. We still *import* oscbf classes (`Manipulator`, `OSCBFVelocityConfig`, etc.).
 - `lerobot` is not installed in this sim env; the Feetech current/load register confirmation is deferred to Task 5.
 
-**Portability principle (read before coding):** The runtime core must stay free of JAX/torch and of any transport (no ZMQ), so the same code runs in sim, in `sim_to_real.py`, and on the Pi edge connector. FK is injected via a provider, so `mujoco` is an *optional* backend, never a hard core dependency. Anything needing JAX/oscbf (sphere derivation, constant export, the reference filter, the sim harness) is **offline or dev tooling** and must not be imported by the core. The portable core lives in a standalone package directory (`so101_safety/`) with a minimal `pyproject.toml` (deps: `numpy`; extra: `mujoco`) so it can be `pip install`ed into the edge repo. Adapters own transport and the bus; the core only sees arrays in, arrays out.
+**Portability principle (read before coding):** The runtime core must stay free of JAX/torch and of any transport (no ZMQ), so the same code runs in sim, in `sim_to_real.py`, and on the Pi edge connector. FK is injected via a provider, so `mujoco` is an *optional* backend, never a hard core dependency. Anything needing JAX/oscbf (sphere derivation, constant export, the reference filter, the sim harness) is **offline or dev tooling** and must not be imported by the core. The portable core lives in a standalone package directory (`so101_safety/`) with a minimal `pyproject.toml` (deps: `numpy`, `scipy`; extra: `mujoco`) so it can be `pip install`ed into the edge repo. `scipy` is included because the CBF-QP uses SLSQP — it is numpy-based, Pi-friendly, and has no JAX/torch dependency. Adapters own transport and the bus; the core only sees arrays in, arrays out.
 
 ---
 
@@ -220,7 +222,7 @@ git commit -m "feat: SO101 workspace box containment CBF"
 - Create: `so101_safety/so101_safety/kinematics_mujoco.py` (`MujocoKinematics`, optional backend; imported lazily)
 - Create: `so101_safety/so101_safety/filter.py` (`SafetyFilter`, takes a `Kinematics` provider)
 - Create: `so101_safety/so101_safety/constants.py` (generated kinematic + sphere constants)
-- Create: `so101_safety/pyproject.toml` (`dependencies = ["numpy"]`, `[project.optional-dependencies] mujoco = ["mujoco"]`)
+- Create: `so101_safety/pyproject.toml` (`dependencies = ["numpy", "scipy"]`, `[project.optional-dependencies] mujoco = ["mujoco"]`)
 - Create: `tools/export_so101_constants.py` (offline: dumps oscbf kinematics + spheres into `constants.py`)
 - Test: `so101_safety/tests/test_fk_parity.py`, `so101_safety/tests/test_filter.py`
 
@@ -237,7 +239,11 @@ class SafetyFilter:
         """current_q, desired_q in radians. feedback may carry motor currents
         for the contact guard (Task 5). Returns a safe joint target in radians."""
 ```
-Internally: provider FK -> sphere world positions -> box-distance barriers -> RD1 velocity-CBF clamp (closed-form per-axis for an axis-aligned box; no QP solver needed) -> velocity cap -> FK gate. The core never imports `mujoco`, `jax`, or any transport; `NumpyKinematics` is the default, `MujocoKinematics` is opt-in.
+Internally: provider FK -> sphere world positions -> box-distance barriers -> CBF-QP velocity clamp -> velocity cap -> FK gate. The core never imports `mujoco`, `jax`, or any transport; `NumpyKinematics` is the default, `MujocoKinematics` is opt-in.
+
+**Jacobian strategy:** `tools/export_so101_constants.py` computes the analytical per-sphere Jacobian `∂sphere_pos/∂q` from the DH chain (using the oscbf `Manipulator`) and emits it as a numpy function in `constants.py`. This keeps the runtime Jacobian evaluation pure numpy with no finite-diff overhead and no JAX at runtime.
+
+**QP solver:** The CBF-QP is small (5 decision variables, ≤30 linear constraints: up to 5 spheres × 6 box walls). Use `scipy.optimize.minimize` (SLSQP) — scipy is numpy-based, Pi-friendly, and has no JAX/torch dependency. `scipy` is added to `pyproject.toml` as a core dependency alongside `numpy`. The QP formulation is: minimise `||δq - δq_nom||²` subject to `J_sphere_i^T · n_wall · δq ≥ -α · h_i` for all active sphere-wall pairs.
 
 **Step 1: Write the failing FK parity tests** (two: numpy-vs-oscbf, and numpy-vs-mujoco)
 ```python
@@ -268,7 +274,7 @@ pytest so101_safety/tests/test_fk_parity.py -v
 ```
 Expected: FAIL (no module / constants yet).
 
-**Step 3: Implement** `tools/export_so101_constants.py` (read oscbf `Manipulator` joint axes, parent transforms, ee offset, sphere data; write `constants.py`), then numpy `kinematics.py` and `filter.py`.
+**Step 3: Implement** `tools/export_so101_constants.py` (read oscbf `Manipulator` joint axes, parent transforms, ee offset, sphere data, and per-sphere Jacobian functions; write `constants.py` with all of these as numpy arrays/callables), then numpy `kinematics.py` (FK + sphere Jacobian) and `filter.py` (CBF-QP via scipy SLSQP). Also update `pyproject.toml` to add `scipy` alongside `numpy` as a core dependency.
 
 **Step 4: Run to verify it passes**
 ```bash
