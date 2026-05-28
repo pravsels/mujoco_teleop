@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "so101-safety"
+version = "0.1.0"
+description = "Portable numpy-only workspace safety filter for the SO101 arm"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy"]
+
+[project.optional-dependencies]
+mujoco = ["mujoco"]
+dev = ["pytest", "jax", "jaxlib"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["so101_safety*"]

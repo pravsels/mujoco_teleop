@@ -1,0 +1,10 @@
+numpy
+scipy
+
+[dev]
+pytest
+jax
+jaxlib
+
+[mujoco]
+mujoco

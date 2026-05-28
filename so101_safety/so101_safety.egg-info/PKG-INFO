@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: so101-safety
+Version: 0.1.0
+Summary: Portable numpy-only workspace safety filter for the SO101 arm
+Requires-Python: >=3.10
+Requires-Dist: numpy
+Requires-Dist: scipy
+Provides-Extra: mujoco
+Requires-Dist: mujoco; extra == "mujoco"
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: jax; extra == "dev"
+Requires-Dist: jaxlib; extra == "dev"
