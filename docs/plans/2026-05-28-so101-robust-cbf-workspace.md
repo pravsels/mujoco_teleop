@@ -27,6 +27,12 @@ Every task ends with a **Visual Check**: an exact command you run, and an explic
 
 **Commit cadence:** commit after each task's visual check passes.
 
+**Environment & sandbox constraints (learned during Task 0 — IMPORTANT):**
+- Use the project venv: `.venv/bin/python` (uv-managed; run tests via `.venv/bin/python -m pytest`). `oscbf` is editable-installed into `.venv` via its deps plus a `.pth` at `.venv/.../site-packages/oscbf_editable.pth` pointing at `../oscbf` and `../oscbf/test`, so `import oscbf` and `import test_so101_real` work.
+- **numpy is pinned to 2.4.6.** The 1.26.4 wheel segfaults in LAPACK on this machine; do not let a resolver downgrade it.
+- **`../oscbf` is read-only** (sandbox blocks writes there). Therefore `oscbf` stays pristine: we do NOT edit it. All SO101-specific code (sphere model, robot builder, CBF config) lives in `mujoco_teleop`. We still *import* oscbf classes (`Manipulator`, `OSCBFVelocityConfig`, etc.).
+- `lerobot` is not installed in this sim env; the Feetech current/load register confirmation is deferred to Task 5.
+
 **Portability principle (read before coding):** The runtime core must stay free of JAX/torch and of any transport (no ZMQ), so the same code runs in sim, in `sim_to_real.py`, and on the Pi edge connector. FK is injected via a provider, so `mujoco` is an *optional* backend, never a hard core dependency. Anything needing JAX/oscbf (sphere derivation, constant export, the reference filter, the sim harness) is **offline or dev tooling** and must not be imported by the core. The portable core lives in a standalone package directory (`so101_safety/`) with a minimal `pyproject.toml` (deps: `numpy`; extra: `mujoco`) so it can be `pip install`ed into the edge repo. Adapters own transport and the bus; the core only sees arrays in, arrays out.
 
 ---
@@ -75,7 +81,7 @@ git commit -m "chore: smoke test + document SO101 CBF baseline"
 
 **Files:**
 - Create: `tools/derive_so101_spheres.py`
-- Create: `../oscbf/oscbf/core/so101_collision_model.py` (generated output, checked in)
+- Create: `so101_collision_model.py` (generated output, checked in, at mujoco_teleop repo root — NOT in oscbf)
 - Test: `tests/test_derive_so101_spheres.py`
 
 **Approach:** Enumerate `class="collision"` geoms on the `wrist`, `gripper`, and `moving_jaw_so101_v1` bodies. For each, use MuJoCo's `model.geom_rbound` as the sphere radius and the geom pose expressed in its parent link frame as the center. Map MuJoCo bodies to oscbf link indices (the oscbf chain joints are `shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll`). Emit `so101_collision_data = {"positions": (...per link...), "radii": (...)}` in the franka model's format (see `../oscbf/oscbf/core/franka_collision_model.py`).
@@ -83,7 +89,7 @@ git commit -m "chore: smoke test + document SO101 CBF baseline"
 **Step 1: Write the failing test**
 ```python
 def test_so101_spheres_are_reasonable():
-    from oscbf.core.so101_collision_model import so101_collision_data
+    from so101_collision_model import so101_collision_data
     positions = so101_collision_data["positions"]
     radii = so101_collision_data["radii"]
     flat_r = [r for link in radii for r in link]
@@ -112,36 +118,44 @@ Expected: PASS.
 
 **Step 5: Commit**
 ```bash
-git add tools/derive_so101_spheres.py ../oscbf/oscbf/core/so101_collision_model.py tests/test_derive_so101_spheres.py
+git add tools/derive_so101_spheres.py so101_collision_model.py tests/test_derive_so101_spheres.py
 git commit -m "feat: derive SO101 gripper sphere cluster from MuJoCo meshes"
 ```
 
 ---
 
-## Task 2: Wire the sphere model into `load_robot()`
+## Task 2: Local SO101 robot builder that wires in the sphere model
+
+oscbf stays pristine. Instead of editing oscbf's `load_robot`, add a local builder `load_so101_robot()` here that reuses oscbf's `Manipulator.from_urdf` + the SO101 URDF constant but passes `collision_data`. Migrate `mujoco_viewer.py` / `sim_to_real.py` to import from this builder.
 
 **Files:**
-- Modify: `../oscbf/test/test_so101_real.py` (the `load_robot` function, ~line 44)
-- Test: `../oscbf/test/test_so101_safety.py` (add a case)
+- Create: `so101_robot.py` (repo root) — `load_so101_robot(with_collision=True)`
+- Modify: `mujoco_viewer.py`, `sim_to_real.py` (swap `from test_so101_real import load_robot` → local builder)
+- Test: `tests/test_so101_safety.py`
 
 **Step 1: Write the failing test**
 ```python
 def test_link_collision_data_nonempty():
     import jax.numpy as jnp
-    from test_so101_real import load_robot
-    robot = load_robot()
+    from so101_robot import load_so101_robot
+    robot = load_so101_robot()
     data = robot.link_collision_data(jnp.zeros(robot.num_joints))
     assert data.shape[0] >= 3 and data.shape[1] == 4  # (x,y,z,r)
 ```
 
-**Step 2: Run to verify it fails** — Expected: FAIL (empty today).
+**Step 2: Run to verify it fails** — Expected: FAIL (module missing).
 
-**Step 3: Implement** — change `load_robot` to:
+**Step 3: Implement** `so101_robot.py`:
 ```python
-def load_robot():
-    from oscbf.core.so101_collision_model import so101_collision_data
-    return Manipulator.from_urdf(SO101_URDF, collision_data=so101_collision_data)
+from test_so101_real import SO101_URDF  # reuse oscbf's URDF path constant
+from oscbf.core.manipulator import Manipulator
+from so101_collision_model import so101_collision_data
+
+def load_so101_robot(with_collision=True):
+    cd = so101_collision_data if with_collision else None
+    return Manipulator.from_urdf(SO101_URDF, collision_data=cd)
 ```
+(Confirm the exact URDF constant name / `from_urdf` signature in `../oscbf/test/test_so101_real.py` while implementing.)
 
 **Step 4: Run to verify it passes** — Expected: PASS.
 
@@ -153,8 +167,8 @@ python mujoco_viewer.py --model so101 --show-oscbf-spheres --table-z 0.05
 
 **Step 5: Commit**
 ```bash
-git add ../oscbf/test/test_so101_real.py ../oscbf/test/test_so101_safety.py
-git commit -m "feat: load SO101 with gripper collision spheres"
+git add so101_robot.py mujoco_viewer.py sim_to_real.py tests/test_so101_safety.py
+git commit -m "feat: local SO101 builder with gripper collision spheres"
 ```
 
 ---
@@ -162,8 +176,8 @@ git commit -m "feat: load SO101 with gripper collision spheres"
 ## Task 3: Workspace containment config (box: floor + walls + ceiling)
 
 **Files:**
-- Create: `../oscbf/oscbf/examples/so101_workspace.py` (`WorkspaceContainmentConfig`)
-- Test: `../oscbf/test/test_so101_safety.py`
+- Create: `so101_workspace.py` (repo root) (`WorkspaceContainmentConfig`)
+- Test: `tests/test_so101_safety.py`
 
 **Approach:** Velocity-CBF (`OSCBFVelocityConfig`). `h_1` returns, for every gripper sphere center `p_i` (radius `r_i`) and box `[lo, hi]` on x/y/z:
 `concat(p_i - lo - r_i, hi - p_i - r_i)`. A `buffer` shrinks the box (`lo += buffer`, `hi -= buffer`) to absorb one-step discrete overshoot. Reuse the 5-DOF `P`/`q` override from `TableAvoidanceConfig`.
@@ -172,9 +186,9 @@ git commit -m "feat: load SO101 with gripper collision spheres"
 ```python
 def test_box_margin_sign():
     import jax.numpy as jnp
-    from test_so101_real import load_robot
-    from oscbf.examples.so101_workspace import WorkspaceContainmentConfig
-    robot = load_robot()
+    from so101_robot import load_so101_robot
+    from so101_workspace import WorkspaceContainmentConfig
+    robot = load_so101_robot()
     cfg = WorkspaceContainmentConfig(robot, lo=(-0.3,-0.3,0.05), hi=(0.3,0.3,0.6))
     h = cfg.h_1(jnp.zeros(robot.num_joints))
     assert bool((h > -1.0).all())  # finite, well-formed
@@ -190,7 +204,7 @@ def test_box_margin_sign():
 
 **Step 5: Commit**
 ```bash
-git add ../oscbf/oscbf/examples/so101_workspace.py ../oscbf/test/test_so101_safety.py
+git add so101_workspace.py tests/test_so101_safety.py
 git commit -m "feat: SO101 workspace box containment CBF"
 ```
 
@@ -230,8 +244,8 @@ Internally: provider FK -> sphere world positions -> box-distance barriers -> RD
 def test_numpy_fk_matches_oscbf():
     import numpy as np, jax.numpy as jnp
     from so101_safety.kinematics import NumpyKinematics
-    from test_so101_real import load_robot           # JAX reference (dev only)
-    robot = load_robot()
+    from so101_robot import load_so101_robot          # JAX reference (dev only)
+    robot = load_so101_robot()
     k = NumpyKinematics()
     for _ in range(20):
         q = np.random.uniform(-1.0, 1.0, 5)
