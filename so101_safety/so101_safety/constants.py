@@ -74,42 +74,37 @@ JOINT_TYPES: np.ndarray = np.array([0, 0, 0, 0, 0])
 
 # Collision sphere local positions, padded to uniform shape.
 # Shape: (num_joints, max_spheres_per_link, 3)
-PADDED_COLLISION_POSITIONS: np.ndarray = np.array([[[ 0.0000e+00,  0.0000e+00,  0.0000e+00],
-      [ 0.0000e+00,  0.0000e+00,  0.0000e+00],
-      [ 0.0000e+00,  0.0000e+00,  0.0000e+00]],
+PADDED_COLLISION_POSITIONS: np.ndarray = np.array([[[ 0.00000e+00,  0.00000e+00,  0.00000e+00],
+      [ 0.00000e+00,  0.00000e+00,  0.00000e+00]],
 
-     [[ 0.0000e+00,  0.0000e+00,  0.0000e+00],
-      [ 0.0000e+00,  0.0000e+00,  0.0000e+00],
-      [ 0.0000e+00,  0.0000e+00,  0.0000e+00]],
+     [[ 0.00000e+00,  0.00000e+00,  0.00000e+00],
+      [ 0.00000e+00,  0.00000e+00,  0.00000e+00]],
 
-     [[ 0.0000e+00,  0.0000e+00,  0.0000e+00],
-      [ 0.0000e+00,  0.0000e+00,  0.0000e+00],
-      [ 0.0000e+00,  0.0000e+00,  0.0000e+00]],
+     [[ 0.00000e+00,  0.00000e+00,  0.00000e+00],
+      [ 0.00000e+00,  0.00000e+00,  0.00000e+00]],
 
-     [[-3.0000e-06, -5.0854e-02,  3.5600e-02],
-      [-2.6160e-03, -3.0259e-02,  2.6508e-02],
-      [ 0.0000e+00,  0.0000e+00,  0.0000e+00]],
+     [[ 0.00000e+00,  0.00000e+00,  0.00000e+00],
+      [ 0.00000e+00,  0.00000e+00,  0.00000e+00]],
 
-     [[ 4.3060e-03,  6.2490e-03, -2.3395e-02],
-      [-1.0883e-02, -7.0000e-05, -4.5140e-02],
-      [ 1.9001e-02,  2.9600e-04, -5.7369e-02]]])
+     [[-1.04890e-02, -2.65000e-04, -1.01701e-01],
+      [ 1.07230e-02, -9.50000e-05, -1.02521e-01]]])
 
 # Collision sphere radii, padded.
 # Shape: (num_joints, max_spheres_per_link)
-PADDED_COLLISION_RADII: np.ndarray = np.array([[0.      , 0.      , 0.      ],
-     [0.      , 0.      , 0.      ],
-     [0.      , 0.      , 0.      ],
-     [0.0124  , 0.01964 , 0.      ],
-     [0.0124  , 0.029864, 0.010457]])
+PADDED_COLLISION_RADII: np.ndarray = np.array([[0.   , 0.   ],
+     [0.   , 0.   ],
+     [0.   , 0.   ],
+     [0.   , 0.   ],
+     [0.005, 0.005]])
 
 # Indices into the flattened (num_joints * max_spheres_per_link) arrays
 # that select the real (non-padded) spheres.
 # Shape: (n_spheres,)
-COLLISION_SLICE_INDICES: np.ndarray = np.array([ 9, 10, 12, 13, 14])
+COLLISION_SLICE_INDICES: np.ndarray = np.array([8, 9])
 
 # Joint index of the parent link for each active sphere.
 # Shape: (n_spheres,)
-SPHERE_PARENT_JOINTS: np.ndarray = np.array([3, 3, 4, 4, 4])
+SPHERE_PARENT_JOINTS: np.ndarray = np.array([4, 4])
 
 NUM_JOINTS: int = 5
-NUM_SPHERES: int = 5
+NUM_SPHERES: int = 2

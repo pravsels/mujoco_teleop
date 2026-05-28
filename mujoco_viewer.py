@@ -103,13 +103,24 @@ def draw_table_plane(scene, z, penetrated=False, half_extent=0.4):
     )
     scene.ngeom += 1
 
-def draw_oscbf_spheres(viewer, oscbf_robot, q, table_z=None):
+def draw_oscbf_spheres(viewer, oscbf_robot, q, table_z=None, mj_model=None, mj_data=None):
     import jax.numpy as jnp
 
     q = q[: oscbf_robot.num_joints]   # strip gripper / extra joints
-    collision = np.asarray(oscbf_robot.link_collision_data(jnp.asarray(q)))
+    collision = np.asarray(oscbf_robot.link_collision_data(jnp.asarray(q))).copy()
     if collision.size == 0:
         return False
+
+    # Override moving jaw sphere position with MuJoCo's live body transform
+    # so it visually tracks the gripper joint (which isn't in the oscbf chain).
+    if mj_model is not None and mj_data is not None and collision.shape[0] >= 2:
+        jaw_body_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "moving_jaw_so101_v1")
+        if jaw_body_id >= 0:
+            local_in_jaw = np.array([-0.0094766, -0.07912087, 0.01889292])
+            R = mj_data.xmat[jaw_body_id].reshape(3, 3)
+            t = mj_data.xpos[jaw_body_id]
+            collision[-1, :3] = R @ local_in_jaw + t
+
     clearances = collision[:, 2] - collision[:, 3]
     active_idx = int(np.argmin(clearances))
     penetrated = table_z is not None and float(clearances[active_idx]) <= table_z
@@ -195,13 +206,16 @@ def main():
 
                     except Exception:
                         pass  # ignore malformed messages
+                else:
+                    # No ZMQ input — step physics so the control panel sliders work
+                    mujoco.mj_step(model, data)
 
                 viewer.user_scn.ngeom = 0
                 penetrated = False
                 if oscbf_robot is not None:
                     penetrated = draw_oscbf_spheres(
                         viewer, oscbf_robot, qpos_to_joint_vector(model, data),
-                        table_z=args.table_z,
+                        table_z=args.table_z, mj_model=model, mj_data=data,
                     )
                 if args.table_z is not None:
                     draw_table_plane(viewer.user_scn, args.table_z, penetrated=penetrated)

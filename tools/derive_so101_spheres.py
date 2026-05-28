@@ -30,7 +30,6 @@ OUTPUT_PY = REPO_ROOT / "so101_collision_model.py"
 # elbow_flex, wrist_flex, wrist_roll). The URDF variant has a fixed gripper, so
 # the moving jaw is rigidly attached to the wrist_roll link (index 4).
 BODY_TO_LINK = {
-    "wrist": 3,
     "gripper": 4,
     "moving_jaw_so101_v1": 4,
 }
@@ -56,21 +55,30 @@ def _geom_sphere(model, data, geom_id: int) -> tuple[np.ndarray, float]:
     verts_local = np.array(model.mesh_vert[addr : addr + nvert], dtype=float)
     xmat = np.array(data.geom_xmat[geom_id], dtype=float).reshape(3, 3)
     verts_world = geom_xpos + verts_local @ xmat.T
-    centroid = verts_world.mean(axis=0)
-    # Use the minimum half-extent (cross-section width) rather than the
-    # max vertex distance (half-length of the jaw), so the safety sphere
-    # tightly wraps the thickness of the link, not its full reach.
-    radius = float(model.geom_size[geom_id].min())
+    # Bias the sphere center toward the tip: use the centroid of the 20%
+    # of vertices most distant from the wrist_roll joint body (the frame
+    # the sphere is expressed in at runtime).
+    wrist_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "wrist_roll")
+    ref_pos = np.array(data.xpos[model.jnt_bodyid[wrist_jid]], dtype=float)
+    dists = np.linalg.norm(verts_world - ref_pos, axis=1)
+    n_tip = max(1, nvert // 5)
+    tip_idx = np.argpartition(dists, -n_tip)[-n_tip:]
+    centroid = verts_world[tip_idx].mean(axis=0)
+    # Fixed 5mm radius for jaw-tip spheres — the jaw tips are thin.
+    radius = 0.005
     return centroid, radius
 
 
 def _world_collision_spheres() -> list[tuple[int, np.ndarray, float]]:
-    """Return (link_idx, world_center, radius) for each gripper collision geom."""
+    """Return (link_idx, world_center, radius) for each gripper jaw tip."""
     model = mujoco.MjModel.from_xml_path(str(SCENE_XML))
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)  # qpos defaults to 0 -> nominal pose
 
     spheres: list[tuple[int, np.ndarray, float]] = []
+    # For the gripper body, pick the LARGEST mesh (the housing that includes
+    # the fixed jaw); for moving_jaw, pick the only mesh.
+    best_per_body: dict[str, tuple[int, float]] = {}  # body_name -> (geom_id, mesh_size)
     for geom_id in range(model.ngeom):
         if int(model.geom_group[geom_id]) != COLLISION_GROUP:
             continue
@@ -78,6 +86,11 @@ def _world_collision_spheres() -> list[tuple[int, np.ndarray, float]]:
         body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id)
         if body_name not in BODY_TO_LINK:
             continue
+        size_metric = float(model.geom_rbound[geom_id])
+        if body_name not in best_per_body or size_metric > best_per_body[body_name][1]:
+            best_per_body[body_name] = (geom_id, size_metric)
+
+    for body_name, (geom_id, _) in best_per_body.items():
         center, radius = _geom_sphere(model, data, geom_id)
         spheres.append((BODY_TO_LINK[body_name], center, radius))
     return spheres
