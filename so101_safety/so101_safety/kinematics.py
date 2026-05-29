@@ -11,6 +11,11 @@ import numpy as np
 from so101_safety.constants import (
     COLLISION_SLICE_INDICES,
     EE_OFFSET,
+    JAW_JOINT_AXIS,
+    JAW_PIVOT_IN_LINK4,
+    JAW_PIVOT_ROT_IN_LINK4,
+    JAW_SPHERE_LOCAL,
+    JAW_SPHERE_RADIUS,
     JOINT_TO_PREV_JOINT_TFS,
     NUM_JOINTS,
     PADDED_COLLISION_POSITIONS,
@@ -27,8 +32,8 @@ class Kinematics(Protocol):
         """World-frame positions of gripper collision spheres. Shape: (n_spheres, 3)."""
         ...
 
-    def sphere_radii(self) -> np.ndarray:
-        """Sphere radii (constant). Shape: (n_spheres,)."""
+    def sphere_radii(self, q: np.ndarray | None = None) -> np.ndarray:
+        """Sphere radii. Shape: (n_spheres,). q needed if sphere count varies."""
         ...
 
     def ee_position(self, q: np.ndarray) -> np.ndarray:
@@ -36,7 +41,7 @@ class Kinematics(Protocol):
         ...
 
     def sphere_jacobians(self, q: np.ndarray) -> np.ndarray:
-        """Positional Jacobian of each sphere w.r.t. q. Shape: (n_spheres, 3, n_joints)."""
+        """Positional Jacobian of each sphere w.r.t. arm joints. Shape: (n_spheres, 3, n_arm_joints)."""
         ...
 
 
@@ -61,15 +66,16 @@ class NumpyKinematics:
     """Pure-numpy FK for SO101, matching the oscbf Manipulator chain exactly.
 
     Uses pre-exported DH constants so no mujoco or JAX is needed at runtime.
+    Supports 5-joint (arm only) or 6-joint (arm + gripper) input. When 6 joints
+    are provided, the moving jaw sphere is included in sphere outputs.
     """
 
     _RADII: np.ndarray  # cached constant
     _AXES: np.ndarray
 
     def __init__(self) -> None:
-        # Build the flat radii array once (select non-padded entries)
         flat_radii = PADDED_COLLISION_RADII.ravel()
-        self._RADII = flat_radii[COLLISION_SLICE_INDICES].copy()
+        self._arm_radii = flat_radii[COLLISION_SLICE_INDICES].copy()
 
     # ------------------------------------------------------------------
     # Core FK
@@ -81,19 +87,31 @@ class NumpyKinematics:
         n = NUM_JOINTS
         transforms = np.empty((n, 4, 4))
         for i in range(n):
-            axis = JOINT_TO_PREV_JOINT_TFS[i, :3, :3].T @ np.array([0.0, 0.0, 1.0])
-            # joint axis in world coordinates doesn't matter here; we use the local
-            # axis (0,0,1) because joint_transform is in the local frame before
-            # being composed with the fixed transform.
             T_joint = _revolute_transform(q[i], np.array([0.0, 0.0, 1.0]))
             transforms[i] = JOINT_TO_PREV_JOINT_TFS[i] @ T_joint
 
-        # Cumulative product: T_world_joint_i = T_0 @ T_1 @ ... @ T_i
         cumulative = np.empty_like(transforms)
         cumulative[0] = transforms[0]
         for i in range(1, n):
             cumulative[i] = cumulative[i - 1] @ transforms[i]
         return cumulative
+
+    def _jaw_sphere_world(self, cumulative: np.ndarray, q_jaw: float) -> np.ndarray:
+        """Compute world-frame position of the moving jaw sphere."""
+        T_link4 = cumulative[4]  # world → link 4
+
+        # Build 4×4 pivot transform in link 4 frame
+        T_pivot = np.eye(4)
+        T_pivot[:3, :3] = JAW_PIVOT_ROT_IN_LINK4
+        T_pivot[:3, 3] = JAW_PIVOT_IN_LINK4
+
+        # Jaw joint rotation
+        T_jaw_rot = _revolute_transform(q_jaw, JAW_JOINT_AXIS)
+
+        # Full chain: world → link4 → pivot → jaw_rotation → local sphere
+        T_world_jaw = T_link4 @ T_pivot @ T_jaw_rot
+        pos_h = np.array([*JAW_SPHERE_LOCAL, 1.0])
+        return (T_world_jaw @ pos_h)[:3]
 
     # ------------------------------------------------------------------
     # Kinematics protocol implementation
@@ -101,52 +119,75 @@ class NumpyKinematics:
 
     def ee_position(self, q: np.ndarray) -> np.ndarray:
         """World-frame EE position. Shape: (3,)."""
-        transforms = self._joint_transforms(q)
+        q = np.asarray(q, dtype=float)
+        transforms = self._joint_transforms(q[:NUM_JOINTS])
         ee_tf = transforms[-1] @ EE_OFFSET
         return ee_tf[:3, 3]
 
     def sphere_positions(self, q: np.ndarray) -> np.ndarray:
-        """World-frame sphere centres. Shape: (n_spheres, 3)."""
-        transforms = self._joint_transforms(q)
-        # Homogeneous padded positions: (n_joints, max_k, 4)
-        ones = np.ones((*PADDED_COLLISION_POSITIONS.shape[:2], 1))
-        pos_h = np.concatenate([PADDED_COLLISION_POSITIONS, ones], axis=-1)
-        # Apply: result[n, k] = transforms[n] @ pos_h[n, k]
-        # einsum 'nij, nkj -> nki' where the last axis is i (output row)
-        pos_world_h = np.einsum("nij,nkj->nki", transforms, pos_h)  # (n, k, 4)
-        all_pts = pos_world_h[:, :, :3].reshape(-1, 3)               # (n*k, 3)
-        return all_pts[COLLISION_SLICE_INDICES]                       # (n_spheres, 3)
+        """World-frame sphere centres. Shape: (n_spheres, 3).
 
-    def sphere_radii(self) -> np.ndarray:
-        """Sphere radii (constant). Shape: (n_spheres,)."""
-        return self._RADII.copy()
+        If q has 6 elements, the jaw sphere is appended.
+        """
+        q = np.asarray(q, dtype=float)
+        transforms = self._joint_transforms(q[:NUM_JOINTS])
+        arm_spheres = self._arm_sphere_positions(transforms)
+
+        if len(q) > NUM_JOINTS:
+            jaw_pos = self._jaw_sphere_world(transforms, q[NUM_JOINTS])
+            return np.vstack([arm_spheres, jaw_pos[np.newaxis, :]])
+        return arm_spheres
+
+    def sphere_radii(self, q: np.ndarray | None = None) -> np.ndarray:
+        """Sphere radii (constant). Shape: (n_spheres,).
+
+        If q is provided and has 6 elements, jaw sphere radius is appended.
+        """
+        if q is not None and len(np.asarray(q)) > NUM_JOINTS:
+            return np.append(self._arm_radii, JAW_SPHERE_RADIUS)
+        return self._arm_radii.copy()
 
     def sphere_jacobians(self, q: np.ndarray) -> np.ndarray:
-        """Positional Jacobians of each sphere w.r.t. q.
+        """Positional Jacobians of each sphere w.r.t. arm joints (first 5).
 
         Uses the standard revolute formula: J[:, j] = z_j × (p_s - o_j)
         for joints j that are upstream of sphere s, else 0.
 
-        Returns shape: (n_spheres, 3, n_joints).
+        Returns shape: (n_spheres, 3, NUM_JOINTS).
         """
-        transforms = self._joint_transforms(q)
-        sph_pos = self._sphere_positions_from_transforms(transforms)  # (n_spheres, 3)
+        q = np.asarray(q, dtype=float)
+        transforms = self._joint_transforms(q[:NUM_JOINTS])
+        arm_spheres = self._arm_sphere_positions(transforms)
 
-        n_sph = len(COLLISION_SLICE_INDICES)
+        has_jaw = len(q) > NUM_JOINTS
+        if has_jaw:
+            jaw_pos = self._jaw_sphere_world(transforms, q[NUM_JOINTS])
+            all_pos = np.vstack([arm_spheres, jaw_pos[np.newaxis, :]])
+            # Jaw sphere is downstream of all 5 arm joints (attached to link 4)
+            parent_joints = np.append(SPHERE_PARENT_JOINTS, 4)
+        else:
+            all_pos = arm_spheres
+            parent_joints = SPHERE_PARENT_JOINTS
+
+        n_sph = len(all_pos)
         J = np.zeros((n_sph, 3, NUM_JOINTS))
 
         for s in range(n_sph):
-            parent = int(SPHERE_PARENT_JOINTS[s])
-            p_s = sph_pos[s]
-            for j in range(parent + 1):  # joints 0..parent are upstream
-                z_j = transforms[j, :3, 2]   # z-axis of joint j in world frame
-                o_j = transforms[j, :3, 3]   # origin of joint j in world frame
+            parent = int(parent_joints[s])
+            p_s = all_pos[s]
+            for j in range(parent + 1):
+                z_j = transforms[j, :3, 2]
+                o_j = transforms[j, :3, 3]
                 J[s, :, j] = np.cross(z_j, p_s - o_j)
 
         return J
 
-    def _sphere_positions_from_transforms(self, transforms: np.ndarray) -> np.ndarray:
-        """Helper: compute sphere positions given pre-computed transforms."""
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _arm_sphere_positions(self, transforms: np.ndarray) -> np.ndarray:
+        """Compute arm sphere world positions from pre-computed transforms."""
         ones = np.ones((*PADDED_COLLISION_POSITIONS.shape[:2], 1))
         pos_h = np.concatenate([PADDED_COLLISION_POSITIONS, ones], axis=-1)
         pos_world_h = np.einsum("nij,nkj->nki", transforms, pos_h)

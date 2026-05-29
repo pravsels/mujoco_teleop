@@ -24,6 +24,7 @@ import numpy as np
 from scipy.optimize import minimize
 
 from so101_safety.kinematics import Kinematics, NumpyKinematics
+from so101_safety.constants import NUM_JOINTS
 
 
 @dataclass
@@ -107,21 +108,26 @@ class SafetyFilter:
         """Return a safe joint target close to desired_q.
 
         Args:
-            current_q: current joint positions (radians), shape (n_joints,).
-            desired_q:  desired joint target (radians), shape (n_joints,).
+            current_q: current joint positions (radians), shape (5,) or (6,).
+                       If 6, the last element is the gripper angle.
+            desired_q:  desired joint target (radians), same shape as current_q.
             feedback:   optional dict with motor readings (reserved for Task 5
                         contact guard — not used here).
 
         Returns:
-            Safe joint target (radians), shape (n_joints,).
+            Safe joint target (radians), same shape as input.
         """
         q0 = np.asarray(current_q, dtype=float)
-        dq_nom = np.asarray(desired_q, dtype=float) - q0
+        q_des = np.asarray(desired_q, dtype=float)
+        has_jaw = len(q0) > NUM_JOINTS
+        n_arm = NUM_JOINTS
 
-        # FK + Jacobians at current configuration
-        sph_pos = self._kin.sphere_positions(q0)    # (n_spheres, 3)
-        sph_rad = self._kin.sphere_radii()          # (n_spheres,)
-        J_sph = self._kin.sphere_jacobians(q0)      # (n_spheres, 3, n_joints)
+        dq_nom = q_des[:n_arm] - q0[:n_arm]
+
+        # FK + Jacobians at current configuration (full q for sphere positions)
+        sph_pos = self._kin.sphere_positions(q0)       # (n_spheres, 3)
+        sph_rad = self._kin.sphere_radii(q0)           # (n_spheres,)
+        J_sph = self._kin.sphere_jacobians(q0)         # (n_spheres, 3, n_arm)
 
         # Build CBF constraint rows: A_cbf @ δq >= b_cbf
         A_rows, b_rows = [], []
@@ -129,22 +135,27 @@ class SafetyFilter:
             for face in self._faces:
                 h = face.barrier(pos[face.axis], rad, self._buffer)
                 a_row = face.jacobian_row(J_s[face.axis])
-                # Constraint: a_row @ δq >= -alpha * h * dt
                 A_rows.append(a_row)
                 b_rows.append(-self._alpha * h * self._dt)
 
-        A_cbf = np.array(A_rows)   # (n_constraints, n_joints)
+        A_cbf = np.array(A_rows)   # (n_constraints, n_arm)
         b_cbf = np.array(b_rows)   # (n_constraints,)
 
         # Optional velocity box constraints: -max_vel <= delta_q <= max_vel
         if self._max_vel is not None:
-            n = len(dq_nom)
-            box_A = np.vstack([np.eye(n), -np.eye(n)])
-            box_b = np.full(2 * n, -self._max_vel)
+            box_A = np.vstack([np.eye(n_arm), -np.eye(n_arm)])
+            box_b = np.full(2 * n_arm, -self._max_vel)
             A_cbf = np.vstack([A_cbf, box_A])
             b_cbf = np.concatenate([b_cbf, box_b])
 
         dq_safe = self._solve_qp(dq_nom, A_cbf, b_cbf)
+
+        # Reconstruct full output (pass gripper through unchanged)
+        if has_jaw:
+            result = np.empty_like(q0)
+            result[:n_arm] = q0[:n_arm] + dq_safe
+            result[n_arm:] = q_des[n_arm:]
+            return result
         return q0 + dq_safe
 
     # ------------------------------------------------------------------

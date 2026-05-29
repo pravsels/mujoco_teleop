@@ -9,6 +9,11 @@ import numpy as np
 
 from so101_safety.constants import (
     COLLISION_SLICE_INDICES,
+    JAW_JOINT_AXIS,
+    JAW_PIVOT_IN_LINK4,
+    JAW_PIVOT_ROT_IN_LINK4,
+    JAW_SPHERE_LOCAL,
+    JAW_SPHERE_RADIUS,
     PADDED_COLLISION_POSITIONS,
     PADDED_COLLISION_RADII,
     SPHERE_PARENT_JOINTS,
@@ -62,61 +67,66 @@ class MujocoKinematics:
             f"Expected: {_SO101_JOINT_NAMES}, got ids: {self._joint_ids}"
         )
 
+        # Resolve gripper joint
+        self._gripper_jid = mujoco.mj_name2id(
+            self._model, mujoco.mjtObj.mjOBJ_JOINT, "gripper"
+        )
+
         # Cache radii
         flat_radii = PADDED_COLLISION_RADII.ravel()
-        self._radii = flat_radii[COLLISION_SLICE_INDICES].copy()
+        self._arm_radii = flat_radii[COLLISION_SLICE_INDICES].copy()
 
     def _set_qpos(self, q: np.ndarray) -> None:
         q = np.asarray(q, dtype=float)
         for chain_idx, jid in enumerate(self._joint_ids):
             self._data.qpos[self._model.jnt_qposadr[jid]] = q[chain_idx]
+        if len(q) > NUM_JOINTS and self._gripper_jid >= 0:
+            self._data.qpos[self._model.jnt_qposadr[self._gripper_jid]] = q[NUM_JOINTS]
         self._mujoco.mj_kinematics(self._model, self._data)
 
     def ee_position(self, q: np.ndarray) -> np.ndarray:
         """World-frame EE position. Shape: (3,)."""
         self._set_qpos(q)
-        # Use the last joint's child body xpos as an approximation, then apply
-        # the ee_offset (identity for SO101). We find the body of the last joint.
         last_jid = self._joint_ids[-1]
         body_id = self._model.jnt_bodyid[last_jid]
-        # Walk to the last body in the chain (child of last joint)
-        # For SO101, the EE is the child body of WristRoll
-        body_pos = self._data.xpos[body_id].copy()
-        # Apply ee_offset (identity for SO101, so just return body pos)
-        # More precisely: T_world_ee = T_world_last_joint @ ee_offset
-        # ee_offset = identity → EE origin = last joint body origin
-        return body_pos
+        return self._data.xpos[body_id].copy()
 
     def sphere_positions(self, q: np.ndarray) -> np.ndarray:
-        """World-frame sphere centres from MuJoCo xpos. Shape: (n_spheres, 3)."""
+        """World-frame sphere centres. Shape: (n_spheres, 3)."""
         self._set_qpos(q)
+        q = np.asarray(q, dtype=float)
 
-        # Replicate the same padded→slice logic as NumpyKinematics, but use
-        # mujoco body transforms instead of the DH chain.
-        # Map joint index 3 → body of joint 3, joint index 4 → body of joint 4.
+        # Arm spheres via body transforms
         parent_jids = [self._joint_ids[int(pj)] for pj in SPHERE_PARENT_JOINTS]
-
-        positions = np.empty((len(COLLISION_SLICE_INDICES), 3))
+        arm_positions = np.empty((len(COLLISION_SLICE_INDICES), 3))
         for s, pjid in enumerate(parent_jids):
             body_id = self._model.jnt_bodyid[pjid]
             R = self._data.xmat[body_id].reshape(3, 3)
             t = self._data.xpos[body_id]
-            # Sphere local position in the link/joint frame from constants
             flat_idx = int(COLLISION_SLICE_INDICES[s])
             k = PADDED_COLLISION_POSITIONS.shape[1]
             link_idx = flat_idx // k
             sph_in_link = flat_idx % k
             local_pos = PADDED_COLLISION_POSITIONS[link_idx, sph_in_link]
-            positions[s] = R @ local_pos + t
-        return positions
+            arm_positions[s] = R @ local_pos + t
 
-    def sphere_radii(self) -> np.ndarray:
-        """Sphere radii (constant). Shape: (n_spheres,)."""
-        return self._radii.copy()
+        if len(q) > NUM_JOINTS and self._gripper_jid >= 0:
+            # Jaw sphere: use the gripper body's live transform
+            jaw_body_id = self._model.jnt_bodyid[self._gripper_jid]
+            R_jaw = self._data.xmat[jaw_body_id].reshape(3, 3)
+            t_jaw = self._data.xpos[jaw_body_id]
+            jaw_world = R_jaw @ JAW_SPHERE_LOCAL + t_jaw
+            return np.vstack([arm_positions, jaw_world[np.newaxis, :]])
+
+        return arm_positions
+
+    def sphere_radii(self, q: np.ndarray | None = None) -> np.ndarray:
+        """Sphere radii. Shape: (n_spheres,)."""
+        if q is not None and len(np.asarray(q)) > NUM_JOINTS:
+            return np.append(self._arm_radii, JAW_SPHERE_RADIUS)
+        return self._arm_radii.copy()
 
     def sphere_jacobians(self, q: np.ndarray) -> np.ndarray:
-        """Positional Jacobian of each sphere w.r.t. q. Shape: (n_spheres, 3, n_joints)."""
-        # Use NumpyKinematics for the Jacobian — it is analytical and the parity
-        # test only checks sphere_positions and ee_position via MuJoCo.
+        """Positional Jacobian of each sphere w.r.t. arm joints. Shape: (n_spheres, 3, NUM_JOINTS)."""
         from so101_safety.kinematics import NumpyKinematics
         return NumpyKinematics().sphere_jacobians(q)

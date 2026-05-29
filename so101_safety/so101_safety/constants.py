@@ -74,37 +74,54 @@ JOINT_TYPES: np.ndarray = np.array([0, 0, 0, 0, 0])
 
 # Collision sphere local positions, padded to uniform shape.
 # Shape: (num_joints, max_spheres_per_link, 3)
-PADDED_COLLISION_POSITIONS: np.ndarray = np.array([[[ 0.00000e+00,  0.00000e+00,  0.00000e+00],
-      [ 0.00000e+00,  0.00000e+00,  0.00000e+00]],
+PADDED_COLLISION_POSITIONS: np.ndarray = np.array([[[ 0.      ,  0.      ,  0.      ]],
 
-     [[ 0.00000e+00,  0.00000e+00,  0.00000e+00],
-      [ 0.00000e+00,  0.00000e+00,  0.00000e+00]],
+     [[ 0.      ,  0.      ,  0.      ]],
 
-     [[ 0.00000e+00,  0.00000e+00,  0.00000e+00],
-      [ 0.00000e+00,  0.00000e+00,  0.00000e+00]],
+     [[ 0.      ,  0.      ,  0.      ]],
 
-     [[ 0.00000e+00,  0.00000e+00,  0.00000e+00],
-      [ 0.00000e+00,  0.00000e+00,  0.00000e+00]],
+     [[ 0.      ,  0.      ,  0.      ]],
 
-     [[-1.04890e-02, -2.65000e-04, -1.01701e-01],
-      [ 1.07230e-02, -9.50000e-05, -1.02521e-01]]])
+     [[-0.010489, -0.000265, -0.101701]]])
 
 # Collision sphere radii, padded.
 # Shape: (num_joints, max_spheres_per_link)
-PADDED_COLLISION_RADII: np.ndarray = np.array([[0.   , 0.   ],
-     [0.   , 0.   ],
-     [0.   , 0.   ],
-     [0.   , 0.   ],
-     [0.005, 0.005]])
+PADDED_COLLISION_RADII: np.ndarray = np.array([[0.   ],
+     [0.   ],
+     [0.   ],
+     [0.   ],
+     [0.005]])
 
 # Indices into the flattened (num_joints * max_spheres_per_link) arrays
 # that select the real (non-padded) spheres.
 # Shape: (n_spheres,)
-COLLISION_SLICE_INDICES: np.ndarray = np.array([8, 9])
+COLLISION_SLICE_INDICES: np.ndarray = np.array([4])
 
 # Joint index of the parent link for each active sphere.
 # Shape: (n_spheres,)
-SPHERE_PARENT_JOINTS: np.ndarray = np.array([4, 4])
+SPHERE_PARENT_JOINTS: np.ndarray = np.array([4])
 
 NUM_JOINTS: int = 5
-NUM_SPHERES: int = 2
+NUM_SPHERES: int = 1
+
+# --- Jaw pivot constants (link 5 = moving jaw, child of link 4) ---
+
+# Position of jaw pivot origin in oscbf link 4 frame.
+# Shape: (3,)
+JAW_PIVOT_IN_LINK4: np.ndarray = np.array([ 0.0202  ,  0.018799, -0.023401])
+
+# Rotation matrix of jaw pivot frame in oscbf link 4 frame (at gripper=0).
+# Shape: (3, 3)
+JAW_PIVOT_ROT_IN_LINK4: np.ndarray = np.array([[ 1.e+00,  6.e-06,  3.e-06],
+     [ 3.e-06,  1.e-05, -1.e+00],
+     [-6.e-06,  1.e+00,  1.e-05]])
+
+# Joint axis of the gripper joint in the jaw pivot frame.
+# Shape: (3,)
+JAW_JOINT_AXIS: np.ndarray = np.array([0., 0., 1.])
+
+# Sphere position in the jaw pivot frame (link 5 local).
+# Shape: (3,)
+JAW_SPHERE_LOCAL: np.ndarray = np.array([-0.009476, -0.079114,  0.018995])
+
+JAW_SPHERE_RADIUS: float = 0.005

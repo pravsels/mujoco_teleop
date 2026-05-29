@@ -29,14 +29,18 @@ Every task ends with a **Visual Check**: an exact command you run, and an explic
 
 **Commit cadence:** commit after each task's visual check passes.
 
-**Environment & sandbox constraints (learned during Task 0 — IMPORTANT):**
+**Environment & sandbox constraints (learned during Tasks 0-4 — IMPORTANT):**
 - Use the project venv: `uv run python ...` from the repo root (or `.venv/bin/python`). The venv is uv-managed.
 - **`dm-control` removed from deps** — it pulled in `labmaze` which requires bazel. We use `mujoco` directly.
 - `oscbf` is editable-installed into `.venv` via a `.pth` at `.venv/.../site-packages/oscbf_editable.pth` pointing at `../oscbf` and `../oscbf/test`, so `import oscbf` and `import test_so101_real` work.
+- **`so101_safety` is editable-installed** via a `.pth` at `.venv/.../site-packages/so101_safety_editable.pth` pointing at the outer `so101_safety/` directory. Without this, `from so101_safety import SafetyFilter` fails from the repo root because Python sees the outer directory as a namespace package instead of finding `so101_safety/so101_safety/__init__.py`. If imports fail, recreate: `echo "/path/to/mujoco_teleop/so101_safety" > "$(python -c 'import site; print(site.getsitepackages()[0])')/so101_safety_editable.pth"`.
 - **`../oscbf` must be on branch `feat/oscbf`** — this branch contains all SO101 work from last week's table test: `test_so101_real.py`, the SO101 URDF path constant, table avoidance config, and the gripper sphere derivation work. If `../oscbf` is on `main`, imports will fail and tasks will appear undone (this already caused Task 1's sphere work to be unnecessarily re-derived). Verify with `cd ../oscbf && git branch` before starting.
 - **numpy is pinned to 2.4.6.** The 1.26.4 wheel segfaults in LAPACK on this machine; do not let a resolver downgrade it.
 - **`../oscbf` is read-only** (sandbox blocks writes there). Therefore `oscbf` stays pristine: we do NOT edit it. All SO101-specific code (sphere model, robot builder, CBF config) lives in `mujoco_teleop`. We still *import* oscbf classes (`Manipulator`, `OSCBFVelocityConfig`, etc.).
 - `lerobot` is not installed in this sim env; the Feetech current/load register confirmation is deferred to Task 5.
+- **`paplay` is not available** on this machine — `beep()` catches `FileNotFoundError` gracefully.
+- **uv cache dir:** If sandbox blocks `/tmp/cursor-sandbox-cache/`, use `UV_CACHE_DIR=/tmp/uv-cache uv pip install ...`.
+- **MuJoCo passive viewer + `data.ctrl` race:** The viewer's UI thread writes slider values to `data.ctrl` continuously. You cannot reliably filter by writing to `data.ctrl` before `mj_step` — the viewer will overwrite it. The working pattern is: read `data.ctrl` as the desired target, filter it, write result to `data.qpos`, call `mj_forward` (kinematic mode, skip `mj_step` entirely when filter is active).
 
 **Portability principle (read before coding):** The runtime core must stay free of JAX/torch and of any transport (no ZMQ), so the same code runs in sim, in `sim_to_real.py`, and on the Pi edge connector. FK is injected via a provider, so `mujoco` is an *optional* backend, never a hard core dependency. Anything needing JAX/oscbf (sphere derivation, constant export, the reference filter, the sim harness) is **offline or dev tooling** and must not be imported by the core. The portable core lives in a standalone package directory (`so101_safety/`) with a minimal `pyproject.toml` (deps: `numpy`, `scipy`; extra: `mujoco`) so it can be `pip install`ed into the edge repo. `scipy` is included because the CBF-QP uses SLSQP — it is numpy-based, Pi-friendly, and has no JAX/torch dependency. Adapters own transport and the bus; the core only sees arrays in, arrays out.
 
@@ -191,124 +195,89 @@ git commit -m "feat: SO101 workspace box containment CBF"
 
 ---
 
-## Task 3.5: Portable numpy-only `SafetyFilter` core (+ JAX parity) — NEXT
+## Task 3.5: Portable numpy-only `SafetyFilter` core (+ JAX parity) ✅
 
 **This is the keystone task** — the reusable component that ships to every environment, including the Pi. Tasks 4-8 become adapters around it.
 
 **Files:**
-- Create: `so101_safety/so101_safety/__init__.py`
-- Create: `so101_safety/so101_safety/kinematics.py` (`Kinematics` protocol + `NumpyKinematics` from exported constants)
-- Create: `so101_safety/so101_safety/kinematics_mujoco.py` (`MujocoKinematics`, optional backend; imported lazily)
-- Create: `so101_safety/so101_safety/filter.py` (`SafetyFilter`, takes a `Kinematics` provider)
-- Create: `so101_safety/so101_safety/constants.py` (generated kinematic + sphere constants)
-- Create: `so101_safety/pyproject.toml` (`dependencies = ["numpy", "scipy"]`, `[project.optional-dependencies] mujoco = ["mujoco"]`)
-- Create: `tools/export_so101_constants.py` (offline: dumps oscbf kinematics + spheres into `constants.py`)
-- Test: `so101_safety/tests/test_fk_parity.py`, `so101_safety/tests/test_filter.py`
+- `so101_safety/so101_safety/__init__.py`
+- `so101_safety/so101_safety/kinematics.py` (`Kinematics` protocol + `NumpyKinematics` from exported constants)
+- `so101_safety/so101_safety/kinematics_mujoco.py` (`MujocoKinematics`, optional backend; imported lazily)
+- `so101_safety/so101_safety/filter.py` (`SafetyFilter`, takes a `Kinematics` provider)
+- `so101_safety/so101_safety/constants.py` (generated kinematic + sphere + jaw pivot constants)
+- `so101_safety/pyproject.toml` (`dependencies = ["numpy", "scipy"]`, `[project.optional-dependencies] mujoco = ["mujoco"]`)
+- `tools/export_so101_constants.py` (offline: dumps oscbf kinematics + spheres + jaw pivot into `constants.py`)
+- Tests: `so101_safety/tests/test_fk_parity.py` (4 tests), `so101_safety/tests/test_filter.py` (7 tests)
 
-**Interface (stable, environment-agnostic):**
-```python
-class Kinematics(Protocol):
-    def sphere_positions(self, q) -> np.ndarray: ...   # (n_spheres, 3) world frame
-    def ee_position(self, q) -> np.ndarray: ...         # (3,)
+**What was done:**
 
-class SafetyFilter:
-    def __init__(self, kinematics: Kinematics, box_lo, box_hi, *,
-                 buffer=0.01, max_vel=None, alpha=5.0, dt=0.05): ...
-    def filter(self, current_q, desired_q, feedback=None) -> np.ndarray:
-        """current_q, desired_q in radians. feedback may carry motor currents
-        for the contact guard (Task 5). Returns a safe joint target in radians."""
-```
-Internally: provider FK -> sphere world positions -> box-distance barriers -> CBF-QP velocity clamp -> velocity cap -> FK gate. The core never imports `mujoco`, `jax`, or any transport; `NumpyKinematics` is the default, `MujocoKinematics` is opt-in.
+The portable core accepts **5-joint (arm only) or 6-joint (arm + gripper)** input. When 6 joints are provided, the moving jaw sphere (link 5) is included in all FK outputs and CBF constraints. The QP optimises over 5 arm joints; the gripper angle is passed through unchanged.
 
-**Jacobian strategy:** `tools/export_so101_constants.py` computes the analytical per-sphere Jacobian `∂sphere_pos/∂q` from the DH chain (using the oscbf `Manipulator`) and emits it as a numpy function in `constants.py`. This keeps the runtime Jacobian evaluation pure numpy with no finite-diff overhead and no JAX at runtime.
+`NumpyKinematics` composes the jaw pivot transform (`T_world_link4 @ T_pivot @ R(q_jaw, jaw_axis)`) from exported constants — no MuJoCo or JAX needed at runtime.
 
-**QP solver:** The CBF-QP is small (5 decision variables, ≤30 linear constraints: up to 5 spheres × 6 box walls). Use `scipy.optimize.minimize` (SLSQP) — scipy is numpy-based, Pi-friendly, and has no JAX/torch dependency. `scipy` is added to `pyproject.toml` as a core dependency alongside `numpy`. The QP formulation is: minimise `||δq - δq_nom||²` subject to `J_sphere_i^T · n_wall · δq ≥ -α · h_i` for all active sphere-wall pairs.
+The CBF-QP uses scipy SLSQP (5 decision variables, up to 2 spheres × 6 walls = 12 CBF constraints + optional velocity box constraints).
 
-**Step 1: Write the failing FK parity tests** (two: numpy-vs-oscbf, and numpy-vs-mujoco)
-```python
-def test_numpy_fk_matches_oscbf():
-    import numpy as np, jax.numpy as jnp
-    from so101_safety.kinematics import NumpyKinematics
-    from so101_robot import load_so101_robot          # JAX reference (dev only)
-    robot = load_so101_robot()
-    k = NumpyKinematics()
-    for _ in range(20):
-        q = np.random.uniform(-1.0, 1.0, 5)
-        ref = np.asarray(robot.ee_position(jnp.asarray(q)))
-        np.testing.assert_allclose(k.ee_position(q), ref, atol=1e-4)
+**Tests (all pass):**
+- `test_numpy_fk_matches_oscbf` — EE position parity with oscbf JAX reference to 1e-4 m
+- `test_numpy_sphere_positions_match_oscbf` — arm sphere parity (5-joint) to 1e-4 m
+- `test_numpy_fk_matches_mujoco` — arm sphere + EE parity with MuJoCo to 1e-4 m
+- `test_numpy_jaw_sphere_matches_mujoco` — jaw sphere parity (6-joint) with MuJoCo to 1e-4 m
+- `test_filter_passes_safe_target` — unconstrained command passes through unchanged
+- `test_filter_clamps_wall_crossing_target` — aggressive command is clamped
+- `test_filter_output_satisfies_cbf_constraints` — filtered output stays inside box
+- `test_filter_agrees_with_jax_reference` — numpy filter matches cbfpy JAX reference to 5e-3
+- `test_filter_6joint_clamps_and_passes_gripper` — 6-joint mode clamps arm, passes gripper
+- `test_filter_6joint_output_stays_in_box` — 6-joint filtered output keeps all spheres in box
+- `test_home_config_is_inside_safe_box` — sanity check
 
-def test_numpy_fk_matches_mujoco():
-    import numpy as np
-    from so101_safety.kinematics import NumpyKinematics
-    from so101_safety.kinematics_mujoco import MujocoKinematics
-    n, m = NumpyKinematics(), MujocoKinematics("robot_models/so101/scene.xml")
-    for _ in range(20):
-        q = np.random.uniform(-1.0, 1.0, 5)
-        np.testing.assert_allclose(n.sphere_positions(q), m.sphere_positions(q), atol=1e-4)
-```
-
-**Step 2: Run to verify it fails**
-```bash
-pytest so101_safety/tests/test_fk_parity.py -v
-```
-Expected: FAIL (no module / constants yet).
-
-**Step 3: Implement** `tools/export_so101_constants.py` (read oscbf `Manipulator` joint axes, parent transforms, ee offset, sphere data, and per-sphere Jacobian functions; write `constants.py` with all of these as numpy arrays/callables), then numpy `kinematics.py` (FK + sphere Jacobian) and `filter.py` (CBF-QP via scipy SLSQP). Also update `pyproject.toml` to add `scipy` alongside `numpy` as a core dependency.
-
-**Step 4: Run to verify it passes**
-```bash
-python tools/export_so101_constants.py
-pytest so101_safety/tests/test_fk_parity.py so101_safety/tests/test_filter.py -v
-```
-Expected: PASS (numpy FK within 1e-4 of JAX; filter clamps a wall-crossing target).
-
-**Step 5: Filter parity vs the JAX reference**
-Add a test asserting `SafetyFilter.filter` agrees with the oscbf `WorkspaceContainmentConfig` safety_filter to a tolerance on random states near the box faces. This is what lets "tested in sim" certify the Pi runtime.
+**Note (resolved during implementation):** The original constants were stale from before the Task 1 gripper redo (had 2 spheres both on link 4 from the old model). Re-running `tools/export_so101_constants.py` and extending the export to include jaw pivot data fixed both FK parity failures.
 
 **Visual Check:** deferred to Task 4 (the relay will now be driven by this core).
 
-**Step 6: Commit**
-```bash
-git add so101_safety tools/export_so101_constants.py
-git commit -m "feat: portable numpy SafetyFilter core with JAX FK/filter parity"
-```
-
 ---
 
-## Task 4: Drive the relay and viewer from the portable core
+## Task 4: Safety filter in the viewer (slider-driven interactive test) ✅
+
+**Approach:** The viewer runs `SafetyFilter` directly in its step loop — MuJoCo GUI sliders set the "desired" position, the filter clamps it, the arm goes there kinematically. One process, zero transport, instant interactive testing.
 
 **Files:**
-- Modify: `cbf_relay.py` and `sim_to_real.py` (replace inline CBF call with `so101_safety.SafetyFilter`; add `--box-min/--box-max`, `--buffer`, `--max-vel-deg`)
-- Modify: `mujoco_viewer.py` / `sim_to_real.py` `draw_*` (draw the box walls, not just the plane)
-- Test: `tests/test_box_clamp.py`
+- Modified: `mujoco_viewer.py` (filter hook in step loop + box drawing + CLI args)
+- Created: `tests/test_box_clamp.py` (3 headless tests)
 
-**Step 1: Write the failing test** — synthetic: a nominal velocity driving a sphere past a wall is clamped so the predicted next position stays inside `box - buffer`.
+**What was done:**
 
-**Step 2: Run to verify it fails** — Expected: FAIL.
+When `--enable-filter` is passed, the viewer operates in **kinematic mode** (no `mj_step` physics): reads slider targets from `data.ctrl`, runs them through `SafetyFilter.filter(last_safe_q, desired_q)`, writes the safe result to `data.qpos`, and calls `mj_forward`. Box faces are drawn as 6 translucent planes (blue when clear, red when a sphere is near the boundary). Collision spheres are drawn from `NumpyKinematics` (no JAX needed).
 
-**Step 3: Implement** — import `SafetyFilter` from the portable core (NOT the JAX config; the relay must not import oscbf at runtime), add CLI args, add `draw_box()` (6 translucent faces; turn red on contact), clamp nominal velocity to `max_vel`. This proves the portable core drives real behavior, not just unit tests.
+The ZMQ path also filters when `--enable-filter` is active (for future leader-arm use).
 
-**Step 4: Run to verify it passes** — Expected: PASS.
+**Lessons learned during implementation (IMPORTANT for future agents):**
 
-**Visual Check (the core case-1 demo):**
+1. **`so101_safety` package import resolution:** The outer `so101_safety/` directory (project wrapper) shadows the inner `so101_safety/so101_safety/` package when running from the repo root. Fix: a `.pth` file at `.venv/lib/python3.13/site-packages/so101_safety_editable.pth` containing the path to the outer dir (same pattern as `oscbf_editable.pth`). Without this, `from so101_safety import SafetyFilter` fails with `ImportError` from the repo root even though pytest inside `so101_safety/tests/` works fine.
+
+2. **Cannot filter by intercepting `data.ctrl` before `mj_step`:** MuJoCo's passive viewer overwrites `data.ctrl` from slider values via its UI thread — there's a race condition where our filtered ctrl gets immediately overwritten. Initial approach of "filter ctrl → mj_step" didn't work (arm passed through walls).
+
+3. **Cannot clamp `data.qpos` after `mj_step` either:** `mj_step` accumulates velocity toward the slider target. Clamping qpos back after each step leaves residual velocity pointing outward, causing the arm to "fall" continuously.
+
+4. **Working approach: kinematic mode when filter is active.** Skip `mj_step` entirely. Read `data.ctrl` (slider target), filter it against `last_safe_q`, write to `data.qpos`, call `mj_forward`. No physics = no gravity/velocity fighting the clamp. The arm goes exactly where the filter allows and stays there.
+
+5. **`paplay` may not be installed** — the `beep()` function now catches `FileNotFoundError`.
+
+6. **Box must contain the home pose:** At `q=zeros` the SO101 gripper reaches ~x=0.39. If `--box-max` x is smaller, the filter fires immediately on launch (correct behavior, but surprising). Use `--box-min "-0.45 -0.45 0.08" --box-max "0.45 0.45 0.55"` for a comfortable starting box.
+
+**Visual Check:** PASS — sliders slam the arm toward walls, spheres stop at box faces with a visible gap, faces flash red, never cross.
+
 ```bash
-# terminal 1
-python mujoco_viewer.py --model so101 --show-oscbf-spheres --table-z 0.08
-# terminal 2 (drive a fast straight-down + sideways target via leader/sliders)
-python sim_to_real.py --port SIM --min-safe-ee-z 0.08 \
-  --box-min " -0.25 -0.25 0.08" --box-max "0.25 0.25 0.55" --max-vel-deg 60 --buffer 0.01
+uv run python mujoco_viewer.py --model so101 --enable-filter \
+  --box-min "-0.45 -0.45 0.08" --box-max "0.45 0.45 0.55"
 ```
-**PASS:** when you slam the target down or sideways, the gripper spheres **decelerate and stop at the box faces** with a small visible gap; faces flash red at the boundary but spheres never cross. **FAIL:** spheres cross any face, oscillate, or stop far away from the face (over-conservative).
 
-**Step 5: Commit**
-```bash
-git add cbf_relay.py sim_to_real.py mujoco_viewer.py tests/test_box_clamp.py
-git commit -m "feat: workspace box filtering + box visualization in relay/viewer"
-```
+**Deferred (trivial follow-on when leader arm is available):**
+- Wire `SafetyFilter` into `cbf_relay.py` / `sim_to_real.py` for the ZMQ command path
+- Same filter, different input source — one-line adapter change
 
 ---
 
-## Task 5: Contact guard (slow-push / high-torque case)
+## Task 5: Contact guard (slow-push / high-torque case) — NEXT
 
 **Files:**
 - Create: `so101_safety/so101_safety/contact_guard.py` (numpy-only `ContactGuard`, part of the portable core)

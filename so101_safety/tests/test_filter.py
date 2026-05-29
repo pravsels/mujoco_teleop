@@ -143,3 +143,45 @@ def test_filter_agrees_with_jax_reference():
 
         np.testing.assert_allclose(q_safe_np, q_safe_jax, atol=5e-3,
                                    err_msg=f"Numpy vs JAX CBF mismatch at q0={q0}")
+
+
+def test_filter_6joint_clamps_and_passes_gripper():
+    """6-joint input: filter optimizes arm joints, passes gripper through."""
+    sf = _make_filter()
+    q0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.5])  # 5 arm + 1 gripper
+    q_des = np.array([0.0, 2.0, 2.0, 2.0, 0.0, 0.8])  # aggressive arm + new gripper
+    q_safe = sf.filter(q0, q_des)
+    assert q_safe.shape == (6,)
+    assert q_safe[5] == 0.8, "Gripper should be passed through unchanged"
+    assert not np.allclose(q_safe[:5], q_des[:5], atol=1e-2), (
+        "Arm joints should have been clamped"
+    )
+
+
+def test_filter_6joint_output_stays_in_box():
+    """6-joint filter output must keep all spheres (arm + jaw) inside the box."""
+    from so101_safety.kinematics import NumpyKinematics
+
+    box_lo = (-0.45, -0.45, 0.10)
+    box_hi = (0.45, 0.45, 0.70)
+    buffer = 0.01
+    sf = _make_filter(box_lo=box_lo, box_hi=box_hi, buffer=buffer)
+    k = NumpyKinematics()
+
+    q0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.3])
+    q_des = np.array([0.0, 2.0, 2.0, 2.0, 0.0, 0.3])
+    q_safe = sf.filter(q0, q_des)
+
+    sph = k.sphere_positions(q_safe)
+    lo = np.array(box_lo) + buffer
+    hi = np.array(box_hi) - buffer
+    radii = k.sphere_radii(q_safe)
+
+    for i, (pos, r) in enumerate(zip(sph, radii)):
+        for axis in range(3):
+            assert pos[axis] - lo[axis] - r >= -1e-3, (
+                f"Sphere {i} violates lower bound on axis {axis}"
+            )
+            assert hi[axis] - pos[axis] - r >= -1e-3, (
+                f"Sphere {i} violates upper bound on axis {axis}"
+            )

@@ -64,3 +64,27 @@ def test_numpy_fk_matches_mujoco():
             n.ee_position(q), m.ee_position(q), atol=1e-4,
             err_msg=f"MuJoCo vs numpy EE pos mismatch at q={q}"
         )
+
+
+def test_numpy_jaw_sphere_matches_mujoco():
+    """6-joint FK: jaw sphere from numpy must match MuJoCo to 1e-4 m."""
+    from so101_safety.kinematics import NumpyKinematics
+    from so101_safety.kinematics_mujoco import MujocoKinematics
+
+    xml_path = os.path.abspath(os.path.join(
+        os.path.dirname(__file__), "..", "..", "robot_models", "so101", "scene.xml"
+    ))
+    n = NumpyKinematics()
+    m = MujocoKinematics(xml_path)
+    rng = np.random.default_rng(77)
+    for _ in range(20):
+        q6 = rng.uniform(-1.0, 1.0, 6)
+        n_pos = n.sphere_positions(q6)
+        m_pos = m.sphere_positions(q6)
+        assert n_pos.shape == m_pos.shape == (2, 3), (
+            f"Expected 2 spheres with 6-joint input, got numpy={n_pos.shape} mujoco={m_pos.shape}"
+        )
+        np.testing.assert_allclose(
+            n_pos, m_pos, atol=1e-4,
+            err_msg=f"6-joint sphere pos mismatch at q={q6}"
+        )
