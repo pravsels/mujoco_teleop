@@ -8,10 +8,19 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "mujoco",
-  "dm-control",
   "numpy",
   "pyzmq>=26",
   "dynamixel-sdk>=3.7.31",
   "feetech-servo-sdk>=1.0.0",
   "pyserial>=3.5",
 ]
+
+[tool.setuptools]
+py-modules = [
+  "calibrate", "cbf_relay", "find_port", "leader_pub", "models",
+  "mujoco_viewer", "sim_to_real", "so101_collision_model", "so101_robot",
+  "so101_workspace", "utils",
+]
+
+[tool.setuptools.packages]
+find = {where = ["."], exclude = ["tests", "tools", "docs", "robot_models", "so101_safety"]}

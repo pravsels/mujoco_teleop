@@ -105,21 +105,29 @@ def draw_table_plane(scene, z, penetrated=False, half_extent=0.4):
 
 def draw_oscbf_spheres(viewer, oscbf_robot, q, table_z=None, mj_model=None, mj_data=None):
     import jax.numpy as jnp
+    from so101_collision_model import so101_collision_data
 
-    q = q[: oscbf_robot.num_joints]   # strip gripper / extra joints
-    collision = np.asarray(oscbf_robot.link_collision_data(jnp.asarray(q))).copy()
+    q_arm = q[: oscbf_robot.num_joints]   # strip gripper / extra joints
+    collision = np.asarray(oscbf_robot.link_collision_data(jnp.asarray(q_arm))).copy()
     if collision.size == 0:
         return False
 
-    # Override moving jaw sphere position with MuJoCo's live body transform
-    # so it visually tracks the gripper joint (which isn't in the oscbf chain).
-    if mj_model is not None and mj_data is not None and collision.shape[0] >= 2:
+    # Add the moving jaw sphere (link 5) using MuJoCo's live jaw body transform.
+    # The sphere center is stored in the jaw pivot frame; we transform it to world
+    # using MuJoCo's body xpos/xmat which already reflects the gripper joint angle.
+    jaw_sphere_world = None
+    if mj_model is not None and mj_data is not None:
         jaw_body_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "moving_jaw_so101_v1")
         if jaw_body_id >= 0:
-            local_in_jaw = np.array([-0.0094766, -0.07912087, 0.01889292])
-            R = mj_data.xmat[jaw_body_id].reshape(3, 3)
-            t = mj_data.xpos[jaw_body_id]
-            collision[-1, :3] = R @ local_in_jaw + t
+            jaw_positions = so101_collision_data["positions"][5]
+            jaw_radii = so101_collision_data["radii"][5]
+            if jaw_positions:
+                local_in_jaw = np.array(jaw_positions[0])
+                R = mj_data.xmat[jaw_body_id].reshape(3, 3)
+                t = mj_data.xpos[jaw_body_id]
+                jaw_sphere_world = R @ local_in_jaw + t
+                jaw_row = np.array([*jaw_sphere_world, jaw_radii[0]])
+                collision = np.vstack([collision, jaw_row[np.newaxis, :]])
 
     clearances = collision[:, 2] - collision[:, 3]
     active_idx = int(np.argmin(clearances))

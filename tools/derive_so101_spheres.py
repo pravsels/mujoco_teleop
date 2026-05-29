@@ -4,11 +4,14 @@ We approximate the wrist + gripper + moving-jaw geometry with a few spheres so
 the workspace-containment CBF can keep the *whole gripper* (not just a single
 end-effector point) inside the safe box.
 
-Each MuJoCo `class="collision"` mesh geom on the wrist/gripper/jaw bodies is
-replaced by its bounding sphere (center = geom world position at q=0, radius =
-`model.geom_rbound`). The world center is then expressed in the corresponding
-oscbf joint frame (via oscbf's own forward kinematics at q=0), so the emitted
-spheres live in the exact frames the CBF transforms them by.
+The model produces 6 links:
+  - Links 0-3: empty (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex)
+  - Link 4 (wrist_roll / gripper body): fixed jaw tip sphere
+  - Link 5 (gripper joint / moving_jaw body): moving jaw tip sphere
+
+The moving jaw sphere is expressed in the jaw pivot frame, so it rotates with
+the gripper joint angle. This allows the safety filter to track the jaw tip at
+any gripper opening.
 
 Run:
     .venv/bin/python tools/derive_so101_spheres.py
@@ -26,106 +29,122 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCENE_XML = REPO_ROOT / "robot_models" / "so101" / "scene.xml"
 OUTPUT_PY = REPO_ROOT / "so101_collision_model.py"
 
-# MuJoCo body name -> oscbf joint/link index (chain: shoulder_pan, shoulder_lift,
-# elbow_flex, wrist_flex, wrist_roll). The URDF variant has a fixed gripper, so
-# the moving jaw is rigidly attached to the wrist_roll link (index 4).
-BODY_TO_LINK = {
-    "gripper": 4,
-    "moving_jaw_so101_v1": 4,
-}
-
-COLLISION_GROUP = 3  # class="collision" sets group=3 in the SO101 XML
-NUM_LINKS = 5
+NUM_LINKS = 6  # 5 arm joints + 1 gripper joint
+SPHERE_RADIUS = 0.005  # 5mm for jaw tips (thin geometry)
 
 
-def _geom_sphere(model, data, geom_id: int) -> tuple[np.ndarray, float]:
-    """Fit a sphere to a geom's world geometry.
-
-    For mesh geoms we fit the sphere to the actual vertex centroid (tight), so an
-    off-center mesh frame does not inflate the radius. Falls back to the broad-phase
-    bounding sphere (`geom_xpos` + `geom_rbound`) for non-mesh geoms.
-    """
-    geom_xpos = np.array(data.geom_xpos[geom_id], dtype=float)
+def _find_tip_centroid(model, data, geom_id: int, ref_pos: np.ndarray) -> np.ndarray:
+    """Find the centroid of the tip vertices (20% furthest from ref_pos) in world frame."""
     if int(model.geom_type[geom_id]) != int(mujoco.mjtGeom.mjGEOM_MESH):
-        return geom_xpos, float(model.geom_rbound[geom_id])
+        return np.array(data.geom_xpos[geom_id], dtype=float)
 
     mesh_id = int(model.geom_dataid[geom_id])
     addr = int(model.mesh_vertadr[mesh_id])
     nvert = int(model.mesh_vertnum[mesh_id])
     verts_local = np.array(model.mesh_vert[addr : addr + nvert], dtype=float)
     xmat = np.array(data.geom_xmat[geom_id], dtype=float).reshape(3, 3)
-    verts_world = geom_xpos + verts_local @ xmat.T
-    # Bias the sphere center toward the tip: use the centroid of the 20%
-    # of vertices most distant from the wrist_roll joint body (the frame
-    # the sphere is expressed in at runtime).
-    wrist_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "wrist_roll")
-    ref_pos = np.array(data.xpos[model.jnt_bodyid[wrist_jid]], dtype=float)
+    xpos = np.array(data.geom_xpos[geom_id], dtype=float)
+    verts_world = xpos + verts_local @ xmat.T
+
     dists = np.linalg.norm(verts_world - ref_pos, axis=1)
     n_tip = max(1, nvert // 5)
     tip_idx = np.argpartition(dists, -n_tip)[-n_tip:]
-    centroid = verts_world[tip_idx].mean(axis=0)
-    # Fixed 5mm radius for jaw-tip spheres — the jaw tips are thin.
-    radius = 0.005
-    return centroid, radius
+    return verts_world[tip_idx].mean(axis=0)
 
 
-def _world_collision_spheres() -> list[tuple[int, np.ndarray, float]]:
-    """Return (link_idx, world_center, radius) for each gripper jaw tip."""
-    model = mujoco.MjModel.from_xml_path(str(SCENE_XML))
-    data = mujoco.MjData(model)
-    mujoco.mj_forward(model, data)  # qpos defaults to 0 -> nominal pose
+def _derive_fixed_jaw_sphere(model, data) -> tuple[np.ndarray, float]:
+    """Derive the fixed jaw tip sphere center in oscbf link 4 (wrist_roll) frame."""
+    gripper_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "gripper")
+    gripper_geoms = [
+        i for i in range(model.ngeom)
+        if model.geom_bodyid[i] == gripper_body_id and model.geom_group[i] == 3
+    ]
+    best_gid = max(gripper_geoms, key=lambda g: model.geom_rbound[g])
 
-    spheres: list[tuple[int, np.ndarray, float]] = []
-    # For the gripper body, pick the LARGEST mesh (the housing that includes
-    # the fixed jaw); for moving_jaw, pick the only mesh.
-    best_per_body: dict[str, tuple[int, float]] = {}  # body_name -> (geom_id, mesh_size)
-    for geom_id in range(model.ngeom):
-        if int(model.geom_group[geom_id]) != COLLISION_GROUP:
-            continue
-        body_id = int(model.geom_bodyid[geom_id])
-        body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id)
-        if body_name not in BODY_TO_LINK:
-            continue
-        size_metric = float(model.geom_rbound[geom_id])
-        if body_name not in best_per_body or size_metric > best_per_body[body_name][1]:
-            best_per_body[body_name] = (geom_id, size_metric)
+    wrist_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "wrist_roll")
+    ref_pos = np.array(data.xpos[model.jnt_bodyid[wrist_jid]], dtype=float)
+    tip_world = _find_tip_centroid(model, data, best_gid, ref_pos)
 
-    for body_name, (geom_id, _) in best_per_body.items():
-        center, radius = _geom_sphere(model, data, geom_id)
-        spheres.append((BODY_TO_LINK[body_name], center, radius))
-    return spheres
-
-
-def _oscbf_joint_world_transforms() -> np.ndarray:
-    """oscbf joint->world transforms at q=0, shape (NUM_LINKS, 4, 4)."""
+    # Express in oscbf link 4 frame
     import jax.numpy as jnp
-
-    from test_so101_real import load_robot  # bare Manipulator.from_urdf, no collision data
-
+    from test_so101_real import load_robot
     robot = load_robot()
     transforms = np.asarray(robot.joint_to_world_transforms(jnp.zeros(robot.num_joints)))
-    return transforms
+    t4 = transforms[4]
+    r4, p4 = t4[:3, :3], t4[:3, 3]
+    tip_in_link4 = r4.T @ (tip_world - p4)
+
+    return tip_in_link4, SPHERE_RADIUS
+
+
+def _derive_moving_jaw_sphere(model, data) -> tuple[np.ndarray, float]:
+    """Derive the moving jaw tip sphere center in the jaw pivot (body) frame."""
+    jaw_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "moving_jaw_so101_v1")
+    jaw_geoms = [
+        i for i in range(model.ngeom)
+        if model.geom_bodyid[i] == jaw_body_id and model.geom_group[i] == 3
+    ]
+    gid = max(jaw_geoms, key=lambda g: model.geom_rbound[g])
+
+    jaw_xpos = np.array(data.xpos[jaw_body_id], dtype=float)
+    jaw_xmat = np.array(data.xmat[jaw_body_id], dtype=float).reshape(3, 3)
+    tip_world = _find_tip_centroid(model, data, gid, jaw_xpos)
+
+    # Express in jaw body frame (the pivot frame that rotates with gripper joint)
+    tip_in_jaw = jaw_xmat.T @ (tip_world - jaw_xpos)
+
+    return tip_in_jaw, SPHERE_RADIUS
+
+
+def _derive_jaw_pivot_in_link4(model, data) -> tuple[np.ndarray, np.ndarray]:
+    """Get the jaw pivot position and base rotation in oscbf link 4 frame.
+
+    Returns (pivot_pos_in_link4, pivot_rot_in_link4) at gripper=0.
+    The portable FK core uses these to compose the 6th joint transform.
+    """
+    jaw_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "moving_jaw_so101_v1")
+    jaw_xpos = np.array(data.xpos[jaw_body_id], dtype=float)
+    jaw_xmat = np.array(data.xmat[jaw_body_id], dtype=float).reshape(3, 3)
+
+    import jax.numpy as jnp
+    from test_so101_real import load_robot
+    robot = load_robot()
+    transforms = np.asarray(robot.joint_to_world_transforms(jnp.zeros(robot.num_joints)))
+    t4 = transforms[4]
+    r4, p4 = t4[:3, :3], t4[:3, 3]
+
+    pivot_pos = r4.T @ (jaw_xpos - p4)
+    pivot_rot = r4.T @ jaw_xmat
+
+    return pivot_pos, pivot_rot
 
 
 def derive() -> dict:
-    spheres = _world_collision_spheres()
-    transforms = _oscbf_joint_world_transforms()
+    model = mujoco.MjModel.from_xml_path(str(SCENE_XML))
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
 
-    positions: list[list[tuple[float, float, float]]] = [[] for _ in range(NUM_LINKS)]
-    radii: list[list[float]] = [[] for _ in range(NUM_LINKS)]
+    fixed_tip, fixed_r = _derive_fixed_jaw_sphere(model, data)
+    moving_tip, moving_r = _derive_moving_jaw_sphere(model, data)
+    pivot_pos, pivot_rot = _derive_jaw_pivot_in_link4(model, data)
 
-    for link_idx, world_center, radius in spheres:
-        t_world_joint = transforms[link_idx]
-        r_wj = t_world_joint[:3, :3]
-        p_wj = t_world_joint[:3, 3]
-        # express the world center in the joint frame: p_link = R^T (p_world - t)
-        p_link = r_wj.T @ (world_center - p_wj)
-        positions[link_idx].append(tuple(float(v) for v in p_link))
-        radii[link_idx].append(round(radius, 6))
+    positions = [() for _ in range(NUM_LINKS)]
+    radii = [() for _ in range(NUM_LINKS)]
+
+    # Link 4: fixed jaw sphere (in oscbf link 4 / wrist_roll frame)
+    positions[4] = (tuple(float(v) for v in fixed_tip),)
+    radii[4] = (round(fixed_r, 6),)
+
+    # Link 5: moving jaw sphere (in jaw pivot frame)
+    positions[5] = (tuple(float(v) for v in moving_tip),)
+    radii[5] = (round(moving_r, 6),)
 
     return {
-        "positions": tuple(tuple(p) for p in positions),
-        "radii": tuple(tuple(r) for r in radii),
+        "positions": tuple(positions),
+        "radii": tuple(radii),
+        "jaw_pivot_in_link4": tuple(float(v) for v in pivot_pos),
+        "jaw_pivot_rot_in_link4": tuple(tuple(float(v) for v in row) for row in pivot_rot),
+        "jaw_joint_axis": (0.0, 0.0, 1.0),  # gripper joint axis in jaw frame
     }
 
 
@@ -136,9 +155,16 @@ def _format_data(data: dict) -> str:
         "Generated by tools/derive_so101_spheres.py from robot_models/so101/scene.xml.",
         "Do not edit by hand; re-run the tool instead.",
         "",
-        "Format matches oscbf Manipulator.from_urdf(collision_data=...):",
-        '    {"positions": tuple[num_links][k][3], "radii": tuple[num_links][k]}',
-        "with sphere centers expressed in each link\'s joint frame.",
+        "6-link model: links 0-4 match oscbf's 5-joint chain (shoulder_pan through",
+        "wrist_roll). Link 5 is the gripper joint (moving jaw). The moving jaw sphere",
+        "is expressed in the jaw pivot frame and rotates with the gripper angle.",
+        "",
+        "Format:",
+        '    positions[link][sphere_idx] = (x, y, z) in the link\'s local frame',
+        '    radii[link][sphere_idx] = radius',
+        '    jaw_pivot_in_link4 = position of jaw pivot in oscbf link 4 frame',
+        '    jaw_pivot_rot_in_link4 = rotation of jaw pivot in oscbf link 4 frame (at gripper=0)',
+        '    jaw_joint_axis = joint axis in jaw pivot frame',
         '"""',
         "",
         "so101_collision_data = {",
@@ -161,6 +187,16 @@ def _format_data(data: dict) -> str:
             inner = ", ".join(f"{r:.6f}" for r in link_radii)
             lines.append(f"        ({inner},),")
     lines.append("    ),")
+
+    piv = data["jaw_pivot_in_link4"]
+    lines.append(f'    "jaw_pivot_in_link4": ({piv[0]:.6f}, {piv[1]:.6f}, {piv[2]:.6f}),')
+    rot = data["jaw_pivot_rot_in_link4"]
+    lines.append('    "jaw_pivot_rot_in_link4": (')
+    for row in rot:
+        lines.append(f"        ({row[0]:.6f}, {row[1]:.6f}, {row[2]:.6f}),")
+    lines.append("    ),")
+    axis = data["jaw_joint_axis"]
+    lines.append(f'    "jaw_joint_axis": ({axis[0]:.1f}, {axis[1]:.1f}, {axis[2]:.1f}),')
     lines.append("}")
     lines.append("")
     return "\n".join(lines)
@@ -170,11 +206,14 @@ def main() -> None:
     data = derive()
     OUTPUT_PY.write_text(_format_data(data))
     n = sum(len(r) for r in data["radii"])
-    print(f"Wrote {OUTPUT_PY.relative_to(REPO_ROOT)} with {n} spheres:")
+    print(f"Wrote {OUTPUT_PY.relative_to(REPO_ROOT)} with {n} spheres (6 links):")
     for link_idx, (pos, rad) in enumerate(zip(data["positions"], data["radii"])):
         if rad:
             for p, r in zip(pos, rad):
-                print(f"  link {link_idx}: center={np.round(p,4)} r={r:.4f}")
+                label = "fixed jaw" if link_idx == 4 else "moving jaw"
+                print(f"  link {link_idx} ({label}): center={np.round(p, 4)} r={r:.4f}")
+    piv = data["jaw_pivot_in_link4"]
+    print(f"  jaw pivot in link 4: ({piv[0]:.4f}, {piv[1]:.4f}, {piv[2]:.4f})")
 
 
 if __name__ == "__main__":

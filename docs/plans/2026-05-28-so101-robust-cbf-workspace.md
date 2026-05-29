@@ -17,7 +17,7 @@
 
 **Out of scope (YAGNI):** whole-body sphere model, self-collision avoidance, torque-OSCBF on hardware, moving-obstacle barriers, JAX on the Pi.
 
-**Known gap (reopens Task 1 & 3.5):** The moving jaw sphere is computed at the closed-jaw position. When the gripper opens, the moving jaw tip extends further (e.g. downward toward the table). The filter does NOT track this — it could miss a collision if the jaw opens near a boundary. Fix: add the gripper as a 6th joint in `NumpyKinematics` and `export_so101_constants.py`, derive the moving jaw sphere as a function of gripper angle, pass 6 joint values to the filter. Tasks 1 and 3.5 are incomplete until this is addressed.
+**Known gap (RESOLVED):** The moving jaw sphere is now on link 5 (a 6th joint), expressed in the jaw pivot frame, and rotates with the gripper angle. The portable FK core (Task 3.5) composes the 6th transform from the exported `jaw_pivot_in_link4` + `jaw_pivot_rot_in_link4` + `jaw_joint_axis` constants. The filter accepts 6 joint values (5 arm + 1 gripper).
 
 ---
 
@@ -30,7 +30,10 @@ Every task ends with a **Visual Check**: an exact command you run, and an explic
 **Commit cadence:** commit after each task's visual check passes.
 
 **Environment & sandbox constraints (learned during Task 0 — IMPORTANT):**
-- Use the project venv: `.venv/bin/python` (uv-managed; run tests via `.venv/bin/python -m pytest`). `oscbf` is editable-installed into `.venv` via its deps plus a `.pth` at `.venv/.../site-packages/oscbf_editable.pth` pointing at `../oscbf` and `../oscbf/test`, so `import oscbf` and `import test_so101_real` work.
+- Use the project venv: `uv run python ...` from the repo root (or `.venv/bin/python`). The venv is uv-managed.
+- **`dm-control` removed from deps** — it pulled in `labmaze` which requires bazel. We use `mujoco` directly.
+- `oscbf` is editable-installed into `.venv` via a `.pth` at `.venv/.../site-packages/oscbf_editable.pth` pointing at `../oscbf` and `../oscbf/test`, so `import oscbf` and `import test_so101_real` work.
+- **`../oscbf` must be on branch `feat/oscbf`** — this branch contains all SO101 work from last week's table test: `test_so101_real.py`, the SO101 URDF path constant, table avoidance config, and the gripper sphere derivation work. If `../oscbf` is on `main`, imports will fail and tasks will appear undone (this already caused Task 1's sphere work to be unnecessarily re-derived). Verify with `cd ../oscbf && git branch` before starting.
 - **numpy is pinned to 2.4.6.** The 1.26.4 wheel segfaults in LAPACK on this machine; do not let a resolver downgrade it.
 - **`../oscbf` is read-only** (sandbox blocks writes there). Therefore `oscbf` stays pristine: we do NOT edit it. All SO101-specific code (sphere model, robot builder, CBF config) lives in `mujoco_teleop`. We still *import* oscbf classes (`Manipulator`, `OSCBFVelocityConfig`, etc.).
 - `lerobot` is not installed in this sim env; the Feetech current/load register confirmation is deferred to Task 5.
@@ -79,50 +82,26 @@ git commit -m "chore: smoke test + document SO101 CBF baseline"
 
 ---
 
-## Task 1: Derive a gripper/wrist sphere cluster from the MuJoCo model ⚠️ INCOMPLETE
+## Task 1: Derive a gripper/wrist sphere cluster from the MuJoCo model ✅
 
 **Files:**
-- Create: `tools/derive_so101_spheres.py`
-- Create: `so101_collision_model.py` (generated output, checked in, at mujoco_teleop repo root — NOT in oscbf)
-- Test: `tests/test_derive_so101_spheres.py`
+- Modified: `tools/derive_so101_spheres.py`
+- Modified: `so101_collision_model.py` (generated output, 6-link model)
+- Modified: `so101_robot.py` (passes only links 0-4 to oscbf; link 5 handled by viewer/filter)
+- Modified: `mujoco_viewer.py` (draws moving jaw sphere from link 5 data via MuJoCo body frame)
+- Modified: `tests/test_derive_so101_spheres.py`
 
-**Approach:** Enumerate `class="collision"` geoms on the `wrist`, `gripper`, and `moving_jaw_so101_v1` bodies. For each, use MuJoCo's `model.geom_rbound` as the sphere radius and the geom pose expressed in its parent link frame as the center. Map MuJoCo bodies to oscbf link indices (the oscbf chain joints are `shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll`). Emit `so101_collision_data = {"positions": (...per link...), "radii": (...)}` in the franka model's format (see `../oscbf/oscbf/core/franka_collision_model.py`).
+**What was done:** Two jaw-tip spheres (5mm radius each):
+- Link 4 (wrist_roll): fixed jaw tip, expressed in oscbf link 4 frame
+- Link 5 (gripper joint): moving jaw tip, expressed in jaw pivot frame — rotates with gripper angle
 
-**Step 1: Write the failing test**
-```python
-def test_so101_spheres_are_reasonable():
-    from so101_collision_model import so101_collision_data
-    positions = so101_collision_data["positions"]
-    radii = so101_collision_data["radii"]
-    flat_r = [r for link in radii for r in link]
-    assert 3 <= len(flat_r) <= 6
-    assert all(0.005 < r < 0.08 for r in flat_r)   # gripper-scale spheres
-```
+The collision model also stores `jaw_pivot_in_link4`, `jaw_pivot_rot_in_link4`, and `jaw_joint_axis` so the portable numpy FK core (Task 3.5) can compose the 6th joint transform without MuJoCo.
 
-**Step 2: Run to verify it fails**
-```bash
-pytest tests/test_derive_so101_spheres.py -v
-```
-Expected: FAIL (module does not exist yet).
+The viewer uses MuJoCo's live `xmat`/`xpos` for the jaw body to transform the link-5 sphere to world frame at every render step.
 
-**Step 3: Implement `tools/derive_so101_spheres.py`**
+oscbf's 5-joint `Manipulator` only receives link 0-4 data (1 sphere on the fixed jaw). The moving jaw sphere is appended by the viewer/filter at runtime.
 
-Load `robot_models/so101/scene.xml`, iterate `model.ngeom`, select geoms whose body is in `{wrist, gripper, moving_jaw_so101_v1}` and `geom_contype/conaffinity` indicate the collision class, compute center in link frame from `geom_pos`/`geom_quat` relative to the mapped joint frame, take `model.geom_rbound[i]` as radius, and write the data file. Keep only the closest-to-tip 3-5 spheres if more are found.
-
-**Step 4: Run to verify it passes**
-```bash
-python tools/derive_so101_spheres.py
-pytest tests/test_derive_so101_spheres.py -v
-```
-Expected: PASS.
-
-**Visual Check:** deferred to Task 2 (overlay needs `load_robot` wired). 
-
-**Step 5: Commit**
-```bash
-git add tools/derive_so101_spheres.py so101_collision_model.py tests/test_derive_so101_spheres.py
-git commit -m "feat: derive SO101 gripper sphere cluster from MuJoCo meshes"
-```
+**Visual Check:** PASS — two spheres track both jaw tips; moving jaw sphere moves independently when gripper angle changes.
 
 ---
 
@@ -212,7 +191,7 @@ git commit -m "feat: SO101 workspace box containment CBF"
 
 ---
 
-## Task 3.5: Portable numpy-only `SafetyFilter` core (+ JAX parity) ⚠️ INCOMPLETE
+## Task 3.5: Portable numpy-only `SafetyFilter` core (+ JAX parity) — NEXT
 
 **This is the keystone task** — the reusable component that ships to every environment, including the Pi. Tasks 4-8 become adapters around it.
 
