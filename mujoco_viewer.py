@@ -1,4 +1,8 @@
-# mujoco_viewer.py 
+# mujoco_viewer.py
+#
+# Usage (with safety filter):
+#   uv run python mujoco_viewer.py --model so101 --enable-filter \
+#     --box-min "-0.45 -0.45 0.08" --box-max "0.45 0.20 0.30"
 
 import os, subprocess
 os.environ['MUJOCO_GL'] = 'glfw'
