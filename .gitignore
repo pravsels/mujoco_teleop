@@ -4,3 +4,5 @@ __pycache__/
 uv.lock 
 
 *.json 
+MUJOCO_LOG.TXT
+full_diff.txt
