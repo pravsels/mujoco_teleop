@@ -29,17 +29,9 @@ def parse_offsets(raw_offsets):
     return offsets
 
 def map_norm_to_qpos(model, qnorm, offsets):
-    """
-    Map normalized [0,1] values to model qpos using joint ranges.
-    - Uses jnt_range when jnt_limited==1.
-    - Fallbacks if unlimited: hinge → [-pi, pi], slide → [-1, 1].
-    - Skips free joints.
-    Yields tuples (qpos_address, q_value). 
-    This is more robust than returning a full array, as it handles skipped joints correctly. 
-    """
     n = min(len(qnorm), model.njnt)
     for j in range(n):
-        jtype   = model.jnt_type[j]
+        jtype   = int(model.jnt_type[j])
         limited = model.jnt_limited[j]
         qadr    = model.jnt_qposadr[j]
         x = float(qnorm[j])
@@ -47,15 +39,17 @@ def map_norm_to_qpos(model, qnorm, offsets):
         if x < 0.0: x = 0.0
         if x > 1.0: x = 1.0
 
-        if jtype == mujoco.mjtJoint.mjJNT_FREE:
-            continue  # free joints have 7 qpos slots; not handled here
+        if jtype == int(mujoco.mjtJoint.mjJNT_FREE):
+            continue
 
-        if jtype in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE):
+        if jtype == int(mujoco.mjtJoint.mjJNT_HINGE) or jtype == int(mujoco.mjtJoint.mjJNT_SLIDE):
             if limited:
                 lo, hi = model.jnt_range[j, 0], model.jnt_range[j, 1]
             else:
-                if jtype == mujoco.mjtJoint.mjJNT_HINGE:
+                if jtype == int(mujoco.mjtJoint.mjJNT_HINGE):
                     lo, hi = -np.pi, np.pi
+                else:
+                    lo, hi = -1.0, 1.0
 
             q = lo + x * (hi - lo)
             name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j)
@@ -66,7 +60,7 @@ def map_norm_to_qpos(model, qnorm, offsets):
 def qpos_to_joint_vector(model, data):
     q = []
     for j in range(model.njnt):
-        if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE:
+        if int(model.jnt_type[j]) == int(mujoco.mjtJoint.mjJNT_FREE):
             continue
         q.append(float(data.qpos[model.jnt_qposadr[j]]))
     return np.asarray(q, dtype=float)
@@ -161,14 +155,12 @@ def main():
         from test_so101_real import load_robot
         oscbf_robot = load_robot()
 
-    # ZMQ sub
     ctx = zmq.Context.instance()
     sub = make_sub(ctx, args.sub_addr, topic)
 
     poller = zmq.Poller()
     poller.register(sub, zmq.POLLIN)
 
-    # a safety mechanism against a rate of 0 
     dt = 1.0 / max(1e-6, args.rate)
     print(f"\nSubscribing to {args.sub_addr} | topic='{topic}'")
     print("Launching viewer…")
@@ -177,7 +169,6 @@ def main():
         try:
             last = time.time()
             while viewer.is_running():
-                # receive latest message. timeout=0 makes it non-blocking. 
                 socks = dict(poller.poll(timeout=0))
                 if sub in socks and socks[sub] == zmq.POLLIN:
                     try:
@@ -186,14 +177,13 @@ def main():
 
                         qnorm = msg.get("qnorm", [])
 
-                        # loop through and set norm values for every joint 
-                        for adr, q in map_norm_to_qpos(model, qnorm, offsets):
-                            data.qpos[adr] = q
+                        with viewer.lock():
+                            for adr, q in map_norm_to_qpos(model, qnorm, offsets):
+                                data.qpos[adr] = q
+                            mujoco.mj_forward(model, data)
 
-                        mujoco.mj_forward(model, data)
-
-                    except Exception:
-                        pass  # ignore malformed messages
+                    except Exception as e:
+                        print("ERR:", repr(e))
 
                 viewer.user_scn.ngeom = 0
                 penetrated = False
@@ -208,7 +198,6 @@ def main():
                     beep()
                 viewer.sync()
 
-                # simple pacing to enforce target refresh rate 
                 now = time.time()
                 sleep = dt - (now - last)
                 if sleep > 0:
@@ -223,4 +212,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
