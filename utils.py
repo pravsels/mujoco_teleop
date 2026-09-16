@@ -12,6 +12,5 @@ def make_sub(ctx, addr, topic_name):
     sub = ctx.socket(zmq.SUB)
     sub.connect(addr)
     sub.setsockopt(zmq.SUBSCRIBE, topic_name.encode())
-    sub.setsockopt(zmq.CONFLATE, 1)
     print(f"Subscribed to {addr}, topic = {topic_name}")
     return sub
